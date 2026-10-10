@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Habit Quest — Level Up Your Life</title>
+  <meta name="description" content="Turn your habits into an RPG character: earn XP, gold and gear." />
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚔️</text></svg>" />
+</head>
+<body>
+  <!-- floating numbers / particles live here -->
+  <div id="fx-layer" class="fx-layer" aria-hidden="true"></div>
+  <div id="toast-layer" class="toast-layer" aria-live="polite" aria-atomic="false"></div>
+
+  <!-- ===================== ONBOARDING ===================== -->
+  <section id="onboarding" class="onboarding hidden">
+    <div class="onboarding-card">
+      <div class="onboarding-crest">⚔️</div>
+      <h1 class="onboarding-title">Habit Quest</h1>
+      <p class="onboarding-sub">
+        Every habit you keep forges a hero. Earn XP and gold for the things you
+        already want to do, then spend it on skills and gear.
+      </p>
+
+      <label class="field">
+        <span class="field-label">Name your hero</span>
+        <input id="hero-name" class="input" type="text" maxlength="24"
+               placeholder="Kael the Unbroken" autocomplete="off" spellcheck="false" />
+      </label>
+
+      <div class="field">
+        <span class="field-label">Choose a calling</span>
+        <div id="arch-grid" class="arch-grid"></div>
+      </div>
+
+      <div class="onboarding-actions">
+        <button id="start-btn" class="btn btn-primary btn-lg" type="button">
+          Begin the journey
+        </button>
+        <button id="demo-btn" class="btn btn-ghost" type="button">
+          Peek at a demo save
+        </button>
+      </div>
+      <p class="onboarding-hint">Your progress saves locally on this machine.</p>
+    </div>
+  </section>
+
+  <!-- ===================== APP ===================== -->
+  <div id="app" class="app hidden">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">⚔️</span>
+        <span class="brand-text">Habit<b>Quest</b></span>
+      </div>
+
+      <nav class="nav" id="nav" aria-label="Sections">
+        <button class="nav-btn active" data-tab="character" type="button">Hero</button>
+        <button class="nav-btn" data-tab="tasks" type="button">Quests</button>
+        <button class="nav-btn" data-tab="shop" type="button">Shop</button>
+        <button class="nav-btn" data-tab="journal" type="button">Journal</button>
+      </nav>
+
+      <div class="topbar-stats">
+        <span class="chip level-chip" id="top-level" title="Level">Lv 1</span>
+        <span class="chip coin-chip" id="top-coins" title="Gold">💰 0</span>
+      </div>
+    </header>
+
+    <div class="xp-strip">
+      <div class="xp-bar" role="progressbar" aria-label="Experience">
+        <div class="xp-bar-fill" id="xp-fill"></div>
+        <span class="xp-bar-label" id="xp-label">0 / 100 XP</span>
+      </div>
+      <div class="streak-strip" id="streak-strip" title="Consecutive active days">
+        <span class="streak-flame">🔥</span><span id="day-streak">0</span> day streak
+      </div>
+    </div>
+
+    <main class="views">
+      <!-- ---------------- HERO ---------------- -->
+      <section class="view active" id="view-character">
+        <div class="hero-grid">
+          <div class="card hero-card">
+            <div class="avatar-frame">
+              <div class="avatar-glow" id="avatar-glow"></div>
+              <div id="avatar" class="avatar-svg"></div>
+              <div class="hero-nameplate">
+                <h2 id="hero-name-display" class="hero-name">Adventurer</h2>
+                <p class="hero-class" id="hero-class">Warrior · Level 1</p>
+              </div>
+            </div>
+            <div class="hero-vitals" id="hero-vitals"></div>
+          </div>
+
+          <div class="card skills-card">
+            <div class="card-head">
+              <h3 class="panel-title">Abilities</h3>
+              <span class="spendable" id="skill-points-badge">0 points</span>
+            </div>
+            <div id="stat-list" class="stat-list"></div>
+            <p class="hint" id="skill-hint">Complete quests to earn skill points.</p>
+          </div>
+
+          <div class="card gear-card">
+            <div class="card-head">
+              <h3 class="panel-title">Equipment</h3>
+              <button class="btn btn-ghost btn-sm" data-goto="shop" type="button">Go shopping</button>
+            </div>
+            <div id="equip-grid" class="equip-grid"></div>
+            <h3 class="panel-title mt">Recent deeds</h3>
+            <div id="hero-feed" class="feed feed-compact"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------------- QUESTS ---------------- -->
+      <section class="view" id="view-tasks">
+        <div class="view-head">
+          <div>
+            <h2 class="view-title">Daily Quests</h2>
+            <p class="view-sub" id="task-summary">No quests yet — add your first habit.</p>
+          </div>
+          <div class="view-actions">
+            <div class="day-ring" id="day-ring" title="Quests completed today">
+              <span class="day-ring-value" id="day-ring-value">0/0</span>
+            </div>
+            <button id="new-task-btn" class="btn btn-primary" type="button">＋ New Quest</button>
+          </div>
+        </div>
+        <div id="task-list" class="task-list"></div>
+      </section>
+
+      <!-- ---------------- SHOP ---------------- -->
+      <section class="view" id="view-shop">
+        <div class="view-head">
+          <div>
+            <h2 class="view-title">The Emporium</h2>
+            <p class="view-sub" id="shop-summary">Spend your hard-earned gold on gear.</p>
+          </div>
+          <div class="wallet" id="wallet">💰 0</div>
+        </div>
+        <div class="chip-row" id="shop-filters"></div>
+        <div id="shop-grid" class="shop-grid"></div>
+        <h3 class="panel-title mt">Your inventory</h3>
+        <div id="inventory-grid" class="inventory-grid"></div>
+      </section>
+
+      <!-- ---------------- JOURNAL ---------------- -->
+      <section class="view" id="view-journal">
+        <div class="view-head">
+          <div>
+            <h2 class="view-title">Journal</h2>
+            <p class="view-sub">Thirty days of proof that you showed up.</p>
+          </div>
+          <button id="reset-btn" class="btn btn-danger btn-sm" type="button">Reset save</button>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <h3 class="panel-title">Activity</h3>
+            <span class="hint" id="heat-legend">less ░ ▒ ▓ █ more</span>
+          </div>
+          <div id="heatmap" class="heatmap"></div>
+        </div>
+        <div id="journal-stats" class="journal-stats"></div>
+        <div class="journal-columns">
+          <div class="card">
+            <h3 class="panel-title">Most completed</h3>
+            <div id="top-tasks" class="top-tasks"></div>
+          </div>
+          <div class="card">
+            <h3 class="panel-title">Achievements</h3>
+            <div id="achievement-grid" class="achievement-grid"></div>
+          </div>
+        </div>
+        <div class="card">
+          <h3 class="panel-title">Adventure log</h3>
+          <div id="activity-feed" class="feed"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ===================== MODAL ===================== -->
+  <div id="modal-backdrop" class="modal-backdrop hidden">
+    <div class="modal" id="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <button class="modal-close" id="modal-close" type="button" aria-label="Close">✕</button>
+      <h2 class="modal-title" id="modal-title"></h2>
+      <div class="modal-body" id="modal-body"></div>
+    </div>
+  </div>
+
+  <noscript>
+    <p style="padding:2rem;font-family:system-ui">
+      Habit Quest needs JavaScript enabled to draw your character.
+    </p>
+  </noscript>
+
+  <script src="app.js"></script>
+</body>
+</html>
