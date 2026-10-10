@@ -8,6 +8,7 @@ returning, and every method that reads returns plain JSON-ready structures.
 from __future__ import annotations
 
 import json
+import math
 import random
 import sqlite3
 import threading
@@ -16,7 +17,20 @@ from datetime import date, datetime, timedelta
 from . import data as D
 from . import engine as E
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# Columns added after the first release. ``_migrate`` adds any that are missing
+# so an existing save keeps working without being rebuilt.
+ADDED_COLUMNS: dict[str, dict[str, str]] = {
+    "character": {"hp": "INTEGER NOT NULL DEFAULT 0"},
+    "tasks": {
+        "mode": "TEXT NOT NULL DEFAULT 'instant'",
+        "duration_minutes": "INTEGER NOT NULL DEFAULT 0",
+        "sessions_won": "INTEGER NOT NULL DEFAULT 0",
+        "sessions_lost": "INTEGER NOT NULL DEFAULT 0",
+    },
+    "completions": {"hp_delta": "INTEGER NOT NULL DEFAULT 0"},
+}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -55,7 +69,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     last_completed TEXT,
     created_at    TEXT    NOT NULL,
     archived      INTEGER NOT NULL DEFAULT 0,
-    sort_order    INTEGER NOT NULL DEFAULT 0
+    sort_order    INTEGER NOT NULL DEFAULT 0,
+    mode            TEXT    NOT NULL DEFAULT 'instant',
+    duration_minutes INTEGER NOT NULL DEFAULT 0,
+    sessions_won    INTEGER NOT NULL DEFAULT 0,
+    sessions_lost   INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS completions (
@@ -65,10 +83,30 @@ CREATE TABLE IF NOT EXISTS completions (
     day        TEXT    NOT NULL,
     xp         INTEGER NOT NULL DEFAULT 0,
     coins      INTEGER NOT NULL DEFAULT 0,
-    multiplier REAL    NOT NULL DEFAULT 1.0
+    multiplier REAL    NOT NULL DEFAULT 1.0,
+    hp_delta   INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_completions_day ON completions(day);
 CREATE INDEX IF NOT EXISTS idx_completions_task ON completions(task_id);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id           INTEGER NOT NULL,
+    mode              TEXT    NOT NULL,
+    started_at        TEXT    NOT NULL,
+    ends_at           TEXT    NOT NULL,
+    finished_at       TEXT,
+    duration_seconds  INTEGER NOT NULL DEFAULT 0,
+    elapsed_seconds   INTEGER NOT NULL DEFAULT 0,
+    remaining_seconds INTEGER NOT NULL DEFAULT 0,
+    status            TEXT    NOT NULL DEFAULT 'active',
+    xp                INTEGER NOT NULL DEFAULT 0,
+    coins             INTEGER NOT NULL DEFAULT 0,
+    damage            INTEGER NOT NULL DEFAULT 0,
+    wounded           INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_task ON sessions(task_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
 
 CREATE TABLE IF NOT EXISTS inventory (
     item_id     TEXT PRIMARY KEY,
@@ -112,6 +150,30 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _now_ms() -> str:
+    return E.now_stamp()
+
+
+def _normalise_duration(mode: str, value) -> int:
+    """Minutes for a timed session; 0 for an instant quest."""
+    if mode not in D.TIMED_MODES:
+        return 0
+    minutes = E.safe_int(value, 0) or 20
+    return E.clamp(minutes, D.SESSION_MIN_MINUTES, D.SESSION_MAX_MINUTES)
+
+
+def _duration_label(minutes: int) -> str:
+    minutes = int(minutes or 0)
+    if minutes <= 0:
+        return ""
+    if minutes < 60:
+        return f"{minutes} min"
+    hours, rest = divmod(minutes, 60)
+    if rest == 0:
+        return f"{hours} hr" if hours == 1 else f"{hours} hr"
+    return f"{hours} hr {rest} min"
+
+
 def _today() -> str:
     return date.today().isoformat()
 
@@ -124,6 +186,7 @@ class Game:
     def __init__(self, path: str = "habitquest.db"):
         self.path = str(path)
         self._lock = threading.RLock()
+        self._settled: list[dict] = []
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -147,6 +210,43 @@ class Game:
                 ("schema_version", str(SCHEMA_VERSION)),
             )
             self._conn.commit()
+            self._migrate()
+
+    def _ensure_columns(self, table: str, columns: dict[str, str]) -> list[str]:
+        """Add any missing columns to ``table``; returns the ones it added."""
+        existing = {row["name"] for row in self._query(f"PRAGMA table_info({table})")}
+        added = []
+        for name, ddl in columns.items():
+            if name not in existing:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+                added.append(name)
+        return added
+
+    def _migrate(self) -> None:
+        """Bring an older save file up to date without losing the hero."""
+        added_hp = "hp" in self._ensure_columns("character", ADDED_COLUMNS["character"])
+        for table in ("tasks", "completions"):
+            self._ensure_columns(table, ADDED_COLUMNS[table])
+
+        if added_hp:
+            # There was no health before this version, so a 0 is "not set yet",
+            # not "knocked out" - fill every hero up.
+            for row in self._query("SELECT id, stats FROM character"):
+                stats = json.loads(row["stats"] or "{}")
+                self._conn.execute(
+                    "UPDATE character SET hp = ? WHERE id = ?",
+                    (E.max_hp(stats), row["id"]),
+                )
+
+        self._conn.execute(
+            "UPDATE tasks SET duration_minutes = 20 "
+            "WHERE mode IN ('beat_clock', 'endure') AND duration_minutes <= 0"
+        )
+        self._conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("schema_version", str(SCHEMA_VERSION)),
+        )
+        self._conn.commit()
 
     def _query(self, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
         return list(self._conn.execute(sql, params))
@@ -171,9 +271,10 @@ class Game:
             self._conn.execute(
                 """INSERT INTO character
                    (id, name, archetype, xp, coins, coins_earned, stats,
-                    total_completions, day_streak, best_day_streak, last_active_day, created_at)
-                   VALUES (1, ?, ?, 0, 100, 100, ?, 0, 0, 0, NULL, ?)""",
-                (name, archetype, json.dumps(base), _now()),
+                    total_completions, day_streak, best_day_streak, last_active_day,
+                    created_at, hp)
+                   VALUES (1, ?, ?, 0, 100, 100, ?, 0, 0, 0, NULL, ?, ?)""",
+                (name, archetype, json.dumps(base), _now(), E.max_hp(base)),
             )
             self._conn.commit()
             if starter_tasks:
@@ -189,6 +290,46 @@ class Game:
             raise GameError("No character yet. Create one first.")
         return row
 
+    # -- health -----------------------------------------------------------
+    def _raw_stats(self, char_row: sqlite3.Row) -> dict:
+        stats = json.loads(char_row["stats"] or "{}")
+        archetype = D.ARCHETYPE_BY_ID.get(char_row["archetype"], D.ARCHETYPES[0])
+        base = dict(archetype["stats"])
+        for key in D.STAT_KEYS:
+            stats.setdefault(key, base.get(key, 0))
+        return {k: int(stats.get(k, 0)) for k in D.STAT_KEYS}
+
+    def _max_hp_for(self, char_row: sqlite3.Row) -> int:
+        """Maximum health includes Vitality from gear, so armour helps."""
+        bonus = E.aggregate_bonuses(self.equipped_items().values())
+        return E.max_hp(E.total_stats(self._raw_stats(char_row), bonus))
+
+    def _hp_for(self, char_row: sqlite3.Row) -> tuple[int, int]:
+        maximum = self._max_hp_for(char_row)
+        if char_row["hp"] is None:
+            return maximum, maximum
+        return max(0, min(int(char_row["hp"]), maximum)), maximum
+
+    def _is_wounded(self, char_row: sqlite3.Row) -> bool:
+        hp, _ = self._hp_for(char_row)
+        return hp <= 0
+
+    def _set_hp(self, value: int) -> None:
+        char = self._character()
+        _, maximum = self._hp_for(char)
+        self._conn.execute(
+            "UPDATE character SET hp = ? WHERE id = 1",
+            (max(0, min(int(value), maximum)),),
+        )
+
+    def _apply_damage(self, amount: int) -> int:
+        """Returns the damage actually taken."""
+        char = self._character()
+        hp, _ = self._hp_for(char)
+        taken = min(hp, max(0, int(amount)))
+        self._set_hp(hp - taken)
+        return taken
+
     def character_meta(self) -> dict:
         row = self._character()
         archetype = D.ARCHETYPE_BY_ID.get(row["archetype"], D.ARCHETYPES[0])
@@ -201,6 +342,7 @@ class Game:
         bonus = E.aggregate_bonuses(equipped.values())
         level_info = E.level_from_xp(row["xp"])
         level = level_info["level"]
+        hp, maximum_hp = self._hp_for(row)
 
         return {
             "name": row["name"],
@@ -223,6 +365,10 @@ class Game:
             "best_day_streak": row["best_day_streak"],
             "last_active_day": row["last_active_day"],
             "created_at": row["created_at"],
+            "hp": hp,
+            "max_hp": maximum_hp,
+            "hp_pct": round(hp / maximum_hp, 4) if maximum_hp else 0.0,
+            "downed": hp <= 0,
             **level_info,
         }
 
@@ -245,7 +391,20 @@ class Game:
             "last_completed": row["last_completed"],
             "created_at": row["created_at"],
             "sort_order": row["sort_order"],
+            "sessions_won": int(row["sessions_won"] or 0),
+            "sessions_lost": int(row["sessions_lost"] or 0),
         }
+        mode = row["mode"] if "mode" in row.keys() else "instant"
+        mode = mode or "instant"
+        mode_info = D.SESSION_MODE_BY_ID.get(mode, D.SESSION_MODES[0])
+        duration = int(row["duration_minutes"] or 0) if "duration_minutes" in row.keys() else 0
+        base["mode"] = mode
+        base["mode_label"] = mode_info["label"]
+        base["mode_icon"] = mode_info["icon"]
+        base["mode_blurb"] = mode_info["blurb"]
+        base["is_timed"] = mode in D.TIMED_MODES
+        base["duration_minutes"] = duration
+        base["duration_label"] = _duration_label(duration)
         done_today = self._one(
             "SELECT id FROM completions WHERE task_id = ? AND day = ?",
             (row["id"], today),
@@ -276,14 +435,19 @@ class Game:
         difficulty = payload.get("difficulty", "easy")
         if difficulty not in D.DIFFICULTY_BY_ID:
             difficulty = "easy"
+        mode = payload.get("mode", "instant")
+        if mode not in D.SESSION_MODE_BY_ID:
+            mode = "instant"
+        duration = _normalise_duration(mode, payload.get("duration_minutes"))
         if sort_order is None:
             row = self._one("SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM tasks")
             sort_order = row["n"] if row else 0
         cur = self._conn.execute(
             """INSERT INTO tasks
                (name, description, stat, xp, coins, icon, color, difficulty,
-                streak, best_streak, completions, last_completed, created_at, archived, sort_order)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, NULL, ?, 0, ?)""",
+                streak, best_streak, completions, last_completed, created_at, archived,
+                sort_order, mode, duration_minutes)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, NULL, ?, 0, ?, ?, ?)""",
             (
                 str(payload.get("name", "")).strip()[:80] or "Untitled quest",
                 str(payload.get("description", ""))[:280],
@@ -295,6 +459,8 @@ class Game:
                 difficulty,
                 _now(),
                 sort_order,
+                mode,
+                duration,
             ),
         )
         self._conn.commit()
@@ -330,6 +496,7 @@ class Game:
                 "difficulty": lambda v: v if v in D.DIFFICULTY_BY_ID else row["difficulty"],
                 "xp": lambda v: E.clamp(E.safe_int(v, row["xp"]), 0, 500),
                 "coins": lambda v: E.clamp(E.safe_int(v, row["coins"]), 0, 500),
+                "mode": lambda v: v if v in D.SESSION_MODE_BY_ID else row["mode"],
             }
             for key, cast in simple.items():
                 if key in payload:
@@ -339,6 +506,19 @@ class Game:
                 return self._task_dict(row)
             values.append(int(task_id))
             self._conn.execute(f"UPDATE tasks SET {', '.join(fields)} WHERE id = ?", tuple(values))
+
+            # Keep mode and duration consistent: instant quests have no timer,
+            # and a timed session always needs a length.
+            fresh = self._one("SELECT mode, duration_minutes FROM tasks WHERE id = ?", (int(task_id),))
+            mode = fresh["mode"]
+            if mode not in D.TIMED_MODES:
+                duration = 0
+            elif "duration_minutes" in payload or not fresh["duration_minutes"]:
+                duration = _normalise_duration(mode, payload.get("duration_minutes",
+                                                                fresh["duration_minutes"]))
+            else:
+                duration = fresh["duration_minutes"]
+            self._conn.execute("UPDATE tasks SET duration_minutes = ? WHERE id = ?", (duration, int(task_id)))
             self._conn.commit()
             return self.state_for_task(task_id)
 
@@ -348,18 +528,79 @@ class Game:
             if row is None:
                 raise GameError("That quest no longer exists.")
             self._conn.execute("DELETE FROM completions WHERE task_id = ?", (int(task_id),))
+            self._conn.execute("DELETE FROM sessions WHERE task_id = ?", (int(task_id),))
             self._conn.execute("DELETE FROM tasks WHERE id = ?", (int(task_id),))
             self._conn.commit()
             self._log("task", f"Quest abandoned: {row['name'][:60]}", "🗑️")
             return self.state()
 
     # -- completing -------------------------------------------------------
+    def _apply_completion(self, task_row, rewards: dict, streak: int) -> dict | None:
+        """Shared bookkeeping for any success, instant or timed.
+
+        Records the completion, moves the task's streak, pays the hero, mends a
+        little health and logs a level-up. Callers log their own activity line,
+        update anything session-specific, then check achievements.
+        """
+        today = _today()
+        best_streak = max(int(task_row["best_streak"]), streak)
+        self._conn.execute(
+            """UPDATE tasks SET streak = ?, best_streak = ?, completions = completions + 1,
+               last_completed = ? WHERE id = ?""",
+            (streak, best_streak, today, task_row["id"]),
+        )
+
+        char = self._character()
+        level_before = E.level_from_xp(char["xp"])["level"]
+        new_xp = int(char["xp"]) + int(rewards["xp"])
+        day_streak = self._day_streak(char["last_active_day"], char["day_streak"], today)
+        best_day = max(int(char["best_day_streak"]), day_streak)
+
+        # A new active day lets the hero rest up; every completion mends a bit more.
+        hp_before, maximum = self._hp_for(char)
+        hp = hp_before
+        if char["last_active_day"] != today:
+            hp += E.rest_heal(maximum)
+        hp = min(maximum, hp + E.heal_per_completion(maximum))
+
+        self._conn.execute(
+            """INSERT INTO completions (task_id, ts, day, xp, coins, multiplier, hp_delta)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (task_row["id"], _now(), today, int(rewards["xp"]), int(rewards["coins"]),
+             float(rewards.get("multiplier", 1.0)), hp - hp_before),
+        )
+        self._conn.execute(
+            """UPDATE character
+               SET xp = ?, coins = coins + ?, coins_earned = coins_earned + ?,
+                   total_completions = total_completions + 1, day_streak = ?,
+                   best_day_streak = ?, last_active_day = ?, hp = ?
+               WHERE id = 1""",
+            (new_xp, int(rewards["coins"]), int(rewards["coins"]), day_streak, best_day, today, hp),
+        )
+        self._conn.commit()
+
+        after = E.level_from_xp(new_xp)
+        if after["level"] > level_before:
+            # A level-up is a full rest: the hero shakes off every wound.
+            self._set_hp(self._max_hp_for(self._character()))
+            self._conn.commit()
+            self._log("level", f"Level up! {char['name']} reached level {after['level']}.", "⬆️")
+            return {
+                "from_level": level_before,
+                "to_level": after["level"],
+                "points": (after["level"] - level_before) * D.SKILL_POINTS_PER_LEVEL,
+            }
+        return None
+
     def complete_task(self, task_id: int) -> dict:
         with self._lock:
+            self._settle_sessions()
             today = _today()
             row = self._one("SELECT * FROM tasks WHERE id = ?", (int(task_id),))
             if row is None:
                 raise GameError("That quest no longer exists.")
+            if (row["mode"] or "instant") in D.TIMED_MODES:
+                raise GameError("That's a timed session - start the clock and finish it.")
 
             already_today = self._one(
                 "SELECT id FROM completions WHERE task_id = ? AND day = ?", (row["id"], today)
@@ -374,66 +615,279 @@ class Game:
 
             streak = E.next_streak(row["last_completed"], today, row["streak"])
             task = self._task_dict(row, today)
-            rewards = E.compute_rewards(task, streak, is_first_today)
-            best_streak = max(int(row["best_streak"]), streak)
-
-            self._conn.execute(
-                """UPDATE tasks
-                   SET streak = ?, best_streak = ?, completions = completions + 1,
-                       last_completed = ?
-                   WHERE id = ?""",
-                (streak, best_streak, today, row["id"]),
+            rewards = E.apply_wounded_penalty(
+                E.compute_rewards(task, streak, is_first_today), self._is_wounded(char)
             )
-            self._conn.execute(
-                """INSERT INTO completions (task_id, ts, day, xp, coins, multiplier)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (row["id"], _now(), today, rewards["xp"], rewards["coins"], rewards["multiplier"]),
-            )
-
-            before = E.level_from_xp(char["xp"])["level"]
-            new_xp = int(char["xp"]) + rewards["xp"]
-
-            day_streak = self._day_streak(char["last_active_day"], char["day_streak"], today)
-            best_day = max(int(char["best_day_streak"]), day_streak)
-
-            self._conn.execute(
-                """UPDATE character
-                   SET xp = ?, coins = coins + ?, coins_earned = coins_earned + ?,
-                       total_completions = total_completions + 1,
-                       day_streak = ?, best_day_streak = ?, last_active_day = ?
-                   WHERE id = 1""",
-                (new_xp, rewards["coins"], rewards["coins"], day_streak, best_day, today),
-            )
-            self._conn.commit()
-
-            after_info = E.level_from_xp(new_xp)
-            level_up = None
-            if after_info["level"] > before:
-                gained = (after_info["level"] - before) * D.SKILL_POINTS_PER_LEVEL
-                level_up = {"from_level": before, "to_level": after_info["level"], "points": gained}
-                self._log("level", f"Level up! {char['name']} reached level {after_info['level']}.",
-                          "⬆️")
 
             bonus_note = []
             if rewards["streak"] > 1:
                 bonus_note.append(f"{rewards['streak']}-day streak ×{rewards['streak_multiplier']}")
             if rewards["daily_bonus"]:
                 bonus_note.append("first quest of the day")
+            if rewards.get("wounded"):
+                bonus_note.append("wounded - half gold")
+
+            level_up = self._apply_completion(row, rewards, streak)
+
             text = f"{row['name'][:50]} complete  ·  +{rewards['xp']} XP  ·  +{rewards['coins']} gold"
             if bonus_note:
                 text += f"  ({', '.join(bonus_note)})"
             self._log("complete", text, row["icon"])
 
             unlocked = self._check_achievements()
-            state = self._build_state()
             return {
                 "ok": True,
+                "outcome": "completed",
                 "task_id": row["id"],
                 "rewards": rewards,
                 "level_up": level_up,
                 "unlocked": unlocked,
-                "state": state,
+                "state": self._build_state(),
             }
+
+    # -- timed sessions ---------------------------------------------------
+    def _session_dict(self, row: sqlite3.Row) -> dict:
+        duration = int(row["duration_seconds"] or 0)
+        elapsed = E.seconds_between(row["started_at"], _now_ms())
+        remaining = max(0.0, duration - elapsed)
+        mode = row["mode"] or "instant"
+        info = D.SESSION_MODE_BY_ID.get(mode, D.SESSION_MODES[0])
+        task = self._one(
+            "SELECT id, name, icon, color FROM tasks WHERE id = ?", (row["task_id"],)
+        )
+        return {
+            "id": row["id"],
+            "task_id": row["task_id"],
+            "task_name": task["name"] if task else "Deleted quest",
+            "task_icon": task["icon"] if task else "🗑️",
+            "task_color": task["color"] if task else "#f59e0b",
+            "mode": mode,
+            "mode_label": info["label"],
+            "mode_icon": info["icon"],
+            "status": row["status"],
+            "started_at": row["started_at"],
+            "ends_at": row["ends_at"],
+            "duration_seconds": duration,
+            "duration_minutes": int(round(duration / 60)) if duration else 0,
+            "elapsed_seconds": int(elapsed),
+            "remaining_seconds": int(math.ceil(remaining)),
+            "ready": remaining <= 0,
+            "overdue": elapsed > duration,
+            "wounded_at_start": bool(row["wounded"]),
+        }
+
+    def _active_session_row(self, task_id: int | None = None) -> sqlite3.Row | None:
+        if task_id is None:
+            return self._one(
+                "SELECT * FROM sessions WHERE status = 'active' ORDER BY id DESC LIMIT 1")
+        return self._one(
+            "SELECT * FROM sessions WHERE status = 'active' AND task_id = ? ORDER BY id DESC LIMIT 1",
+            (int(task_id),),
+        )
+
+    def active_session(self) -> dict | None:
+        with self._lock:
+            row = self._active_session_row()
+            return self._session_dict(row) if row else None
+
+    def start_session(self, task_id: int) -> dict:
+        with self._lock:
+            self._settle_sessions()
+            row = self._one("SELECT * FROM tasks WHERE id = ?", (int(task_id),))
+            if row is None:
+                raise GameError("That quest no longer exists.")
+            mode = row["mode"] or "instant"
+            if mode not in D.TIMED_MODES:
+                raise GameError("That quest isn't a timed session.")
+            if self._active_session_row() is not None:
+                raise GameError("A session is already running - finish it or give up first.")
+
+            today = _today()
+            if self._one("SELECT id FROM completions WHERE task_id = ? AND day = ?",
+                         (row["id"], today)) is not None:
+                raise GameError("You've already done this one today.")
+
+            minutes = _normalise_duration(mode, row["duration_minutes"])
+            duration = minutes * 60
+            started = _now_ms()
+            ends = (datetime.now() + timedelta(seconds=duration)).isoformat(timespec="milliseconds")
+            char = self._character()
+            cur = self._conn.execute(
+                """INSERT INTO sessions
+                   (task_id, mode, started_at, ends_at, duration_seconds, status, wounded)
+                   VALUES (?, ?, ?, ?, ?, 'active', ?)""",
+                (row["id"], mode, started, ends, duration, 1 if self._is_wounded(char) else 0),
+            )
+            self._conn.commit()
+            info = D.SESSION_MODE_BY_ID[mode]
+            self._log("session",
+                      f"Timer started: {row['name'][:40]} ({_duration_label(minutes)}, "
+                      f"{info['label']})", info["icon"])
+            session = self._session_dict(
+                self._one("SELECT * FROM sessions WHERE id = ?", (cur.lastrowid,)))
+            return {"ok": True, "outcome": "started", "session": session,
+                    "state": self._build_state()}
+
+    def _just_settled_hit(self, task_id: int) -> dict | None:
+        for item in getattr(self, "_settled", []) or []:
+            if int(item["task_id"]) == int(task_id):
+                return item
+        return None
+
+    def finish_session(self, task_id: int) -> dict:
+        with self._lock:
+            # Look for this task's session before sweeping up stale ones, so an
+            # expired Beat the Clock press still reports the hit it earned
+            # rather than a confusing "nothing is running".
+            session_row = self._active_session_row(task_id)
+            if session_row is None:
+                self._settle_sessions()
+                hit = self._just_settled_hit(task_id)
+                if hit is not None:
+                    return {"ok": True, "outcome": "hit", "damage": hit["damage"],
+                            "state": self._build_state()}
+                raise GameError("No session is running for that quest.")
+
+            duration = int(session_row["duration_seconds"] or 0)
+            elapsed = E.seconds_between(session_row["started_at"], _now_ms())
+            mode = session_row["mode"]
+            outcome = E.session_outcome(mode, elapsed, duration)
+
+            if outcome == "too_early":
+                left = max(0, int(math.ceil(duration - elapsed)))
+                pretty = (_duration_label(max(1, int(round(left / 60)))) if left >= 60
+                          else f"{left} second{'s' if left != 1 else ''}")
+                raise GameError(f"Not yet - {pretty} still to serve.")
+
+            if outcome == "hit":
+                damage = self._lose_session(session_row, elapsed)
+                return {"ok": True, "outcome": "hit", "damage": damage,
+                        "state": self._build_state()}
+
+            task_row = self._one("SELECT * FROM tasks WHERE id = ?", (session_row["task_id"],))
+            if task_row is None:
+                raise GameError("That quest no longer exists.")
+
+            today = _today()
+            char = self._character()
+            is_first_today = self._one(
+                "SELECT id FROM completions WHERE day = ? LIMIT 1", (today,)) is None
+            streak = E.next_streak(task_row["last_completed"], today, task_row["streak"])
+            task = self._task_dict(task_row, today)
+            rewards = E.apply_wounded_penalty(
+                E.session_rewards(task, streak, is_first_today, mode, elapsed, duration),
+                self._is_wounded(char),
+            )
+
+            self._conn.execute(
+                """UPDATE sessions SET status = 'won', finished_at = ?, elapsed_seconds = ?,
+                   remaining_seconds = ?, xp = ?, coins = ?, damage = 0 WHERE id = ?""",
+                (_now_ms(), int(elapsed), int(max(0, round(duration - elapsed))),
+                 int(rewards["xp"]), int(rewards["coins"]), session_row["id"]),
+            )
+            self._conn.execute(
+                "UPDATE tasks SET sessions_won = sessions_won + 1 WHERE id = ?",
+                (task_row["id"],),
+            )
+            level_up = self._apply_completion(task_row, rewards, streak)
+
+            notes = []
+            if rewards.get("speed_bonus"):
+                notes.append(f"{int(round(rewards['speed_bonus'] * 100))}% time to spare")
+            if rewards.get("endure_bonus"):
+                notes.append(f"{int(round(rewards['endure_bonus'] * 100))}% endurance bonus")
+            if rewards.get("wounded"):
+                notes.append("wounded - half gold")
+            text = (f"{task_row['name'][:44]} session won  ·  +{rewards['xp']} XP  ·  "
+                    f"+{rewards['coins']} gold")
+            if notes:
+                text += f"  ({', '.join(notes)})"
+            self._log("session", text, D.SESSION_MODE_BY_ID.get(mode, D.SESSION_MODES[0])["icon"])
+
+            unlocked = self._check_achievements()
+            return {"ok": True, "outcome": "won", "rewards": rewards, "level_up": level_up,
+                    "unlocked": unlocked, "state": self._build_state()}
+
+    def abandon_session(self, task_id: int) -> dict:
+        with self._lock:
+            session_row = self._active_session_row(task_id)
+            if session_row is None:
+                self._settle_sessions()
+                hit = self._just_settled_hit(task_id)
+                if hit is not None:
+                    return {"ok": True, "outcome": "hit", "damage": hit["damage"],
+                            "state": self._build_state()}
+                raise GameError("No session is running for that quest.")
+
+            duration = int(session_row["duration_seconds"] or 0)
+            elapsed = E.seconds_between(session_row["started_at"], _now_ms())
+            if (session_row["mode"] == "beat_clock"
+                    and elapsed > duration + D.SESSION_GRACE_SECONDS):
+                # The bell already rang - walking away doesn't dodge the hit.
+                damage = self._lose_session(session_row, elapsed)
+                return {"ok": True, "outcome": "hit", "damage": damage,
+                        "state": self._build_state()}
+
+            self._conn.execute(
+                """UPDATE sessions SET status = 'abandoned', finished_at = ?,
+                   elapsed_seconds = ?, remaining_seconds = ? WHERE id = ?""",
+                (_now_ms(), int(elapsed), int(max(0, round(duration - elapsed))),
+                 session_row["id"]),
+            )
+            self._conn.commit()
+            task = self._one("SELECT name, icon FROM tasks WHERE id = ?", (session_row["task_id"],))
+            name = task["name"][:44] if task else "a quest"
+            self._log("session", f"Gave up on {name} - no reward this time.", "🏳️")
+            return {"ok": True, "outcome": "abandoned", "state": self._build_state()}
+
+    def _lose_session(self, session_row: sqlite3.Row, elapsed: float) -> int:
+        """The bell caught the hero out: take a hit and lose the chain."""
+        task_row = self._one("SELECT * FROM tasks WHERE id = ?", (session_row["task_id"],))
+        char = self._character()
+        _, maximum = self._hp_for(char)
+        difficulty = task_row["difficulty"] if task_row else "easy"
+        damage = self._apply_damage(E.hit_damage(difficulty, maximum))
+
+        self._conn.execute(
+            """UPDATE sessions SET status = 'lost', finished_at = ?, elapsed_seconds = ?,
+               remaining_seconds = 0, damage = ? WHERE id = ?""",
+            (_now_ms(), int(elapsed), damage, session_row["id"]),
+        )
+        if task_row is not None:
+            self._conn.execute(
+                "UPDATE tasks SET streak = 0, sessions_lost = sessions_lost + 1 WHERE id = ?",
+                (task_row["id"],),
+            )
+        self._conn.commit()
+
+        name = task_row["name"][:44] if task_row else "a quest"
+        icon = task_row["icon"] if task_row else "💥"
+        self._log("hit", f"The bell caught you on {name} - you took {damage} damage.", icon)
+        return damage
+
+    def _settle_sessions(self) -> list[dict]:
+        """Resolve Beat the Clock windows that closed while nobody was looking.
+
+        Stay the Course sessions are deliberately left open - running over the
+        time is allowed, so they only end when the hero finishes or gives up.
+
+        Anything resolved here is remembered on ``_settled`` so the next state
+        payload can tell the UI to play the hit - that matters when the window
+        closes while the tab is shut.
+        """
+        settled: list[dict] = []
+        self._settled = settled
+        now = _now_ms()
+        for row in self._query(
+            "SELECT * FROM sessions WHERE status = 'active' AND mode = 'beat_clock'"
+        ):
+            duration = int(row["duration_seconds"] or 0)
+            elapsed = E.seconds_between(row["started_at"], now)
+            if elapsed <= duration + D.SESSION_GRACE_SECONDS:
+                continue
+            settled.append({"session_id": row["id"], "task_id": row["task_id"],
+                            "damage": self._lose_session(row, elapsed)})
+        return settled
 
     def _day_streak(self, last_day: str | None, current: int, today: str) -> int:
         if not last_day:
@@ -475,12 +929,16 @@ class Game:
             char = self._character()
             new_xp = max(0, int(char["xp"]) - int(last["xp"]))
             new_coins = max(0, int(char["coins"]) - int(last["coins"]))
+            # Health mended by that completion is rolled back too, otherwise
+            # completing and undoing the same quest would be a free heal.
+            hp, maximum = self._hp_for(char)
+            restored = max(0, hp - max(0, int(last["hp_delta"] or 0)))
             self._conn.execute(
                 """UPDATE character
                    SET xp = ?, coins = ?, coins_earned = MAX(0, coins_earned - ?),
-                       total_completions = MAX(0, total_completions - 1)
+                       total_completions = MAX(0, total_completions - 1), hp = ?
                    WHERE id = 1""",
-                (new_xp, new_coins, int(last["coins"])),
+                (new_xp, new_coins, int(last["coins"]), min(restored, maximum)),
             )
             self._conn.commit()
             self._log("undo", f"Undid '{row['name'][:50]}'  ·  −{last['xp']} XP", "↩️")
@@ -620,6 +1078,23 @@ class Game:
     def unlocked_ids(self) -> set[str]:
         return {r["id"] for r in self._query("SELECT id FROM achievements")}
 
+    def _session_metrics(self) -> dict:
+        def count(sql: str, params: tuple = ()) -> int:
+            row = self._one(sql, params)
+            return int(row["n"] or 0) if row else 0
+
+        return {
+            "sessions_won": count("SELECT COUNT(*) AS n FROM sessions WHERE status = 'won'"),
+            "sessions_lost": count("SELECT COUNT(*) AS n FROM sessions WHERE status = 'lost'"),
+            "endure_won": count(
+                "SELECT COUNT(*) AS n FROM sessions WHERE status = 'won' AND mode = 'endure'"),
+            "swift_wins": count(
+                "SELECT COUNT(*) AS n FROM sessions WHERE status = 'won' AND mode = 'beat_clock' "
+                "AND remaining_seconds * 2 >= duration_seconds"),
+            "wounded_wins": count(
+                "SELECT COUNT(*) AS n FROM sessions WHERE status = 'won' AND wounded = 1"),
+        }
+
     def _metrics(self) -> dict:
         char = self.character_meta()
         tasks = self.list_tasks(include_archived=True)
@@ -633,6 +1108,7 @@ class Game:
             "slots_filled": len([v for v in self.equipped_map().values() if v]),
             "coins": char["coins"],
             "longest_day_run": E.longest_day_run(all_days),
+            **self._session_metrics(),
         }
 
     def _check_achievements(self) -> list[dict]:
@@ -747,9 +1223,15 @@ class Game:
                     "slot_label": D.SLOT_LABELS[item["slot"]],
                     "bonus_text": "  ".join(f"+{v} {D.STAT_ABBR[k]}" for k, v in item["bonus"].items()),
                 }
+        settled = list(getattr(self, "_settled", []) or [])
+        self._settled = []
         return {
             "has_character": True,
             "character": char,
+            "session": self._session_dict(self._active_session_row())
+                       if self._active_session_row() else None,
+            "server_now": _now_ms(),
+            "settled": settled,
             "tasks": tasks,
             "equipped": {
                 slot: (dict(D.ITEM_BY_ID[item_id], slot=slot,
@@ -773,6 +1255,10 @@ class Game:
                 "colors": D.TASK_COLORS,
                 "difficulties": D.DIFFICULTIES,
                 "stats_per_level": D.SKILL_POINTS_PER_LEVEL,
+                "session_modes": D.SESSION_MODES,
+                "duration_presets": D.DURATION_PRESETS,
+                "session_min_minutes": D.SESSION_MIN_MINUTES,
+                "session_max_minutes": D.SESSION_MAX_MINUTES,
                 "today": _today(),
             },
         }
@@ -790,16 +1276,21 @@ class Game:
                         "colors": D.TASK_COLORS,
                         "difficulties": D.DIFFICULTIES,
                         "slots": D.SLOTS,
+                        "session_modes": D.SESSION_MODES,
+                        "duration_presets": D.DURATION_PRESETS,
+                        "session_min_minutes": D.SESSION_MIN_MINUTES,
+                        "session_max_minutes": D.SESSION_MAX_MINUTES,
                         "today": _today(),
                     },
                 }
+            self._settle_sessions()
             self._check_achievements()
             return self._build_state()
 
     # -- maintenance ------------------------------------------------------
     def reset(self) -> dict:
         with self._lock:
-            for table in ("character", "tasks", "completions", "inventory",
+            for table in ("character", "tasks", "completions", "sessions", "inventory",
                           "equipped", "achievements", "activity"):
                 self._conn.execute(f"DELETE FROM {table}")
             self._conn.execute("DELETE FROM sqlite_sequence")
@@ -827,6 +1318,14 @@ class Game:
                  "color": "#84cc16", "difficulty": "tiny", "description": "A clear desk, a clear head."},
                 {"name": "Call a friend", "stat": "cha", "xp": 11, "coins": 9, "icon": "🤝",
                  "color": "#f97316", "difficulty": "easy", "description": "Keep the bonds strong."},
+                {"name": "Read for 30 minutes", "stat": "int", "xp": 16, "coins": 13,
+                 "icon": "📖", "color": "#3b82f6", "difficulty": "normal", "mode": "endure",
+                 "duration_minutes": 30,
+                 "description": "Stay with the book for the whole sitting."},
+                {"name": "Sweep the kitchen", "stat": "agi", "xp": 10, "coins": 8,
+                 "icon": "🧹", "color": "#84cc16", "difficulty": "easy", "mode": "beat_clock",
+                 "duration_minutes": 20,
+                 "description": "Twenty minutes to get it done."},
             ]
             existing = {t["name"] for t in self.list_tasks(include_archived=True)}
             task_ids = [t["id"] for t in self.list_tasks(include_archived=True)]

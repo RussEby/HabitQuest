@@ -13,6 +13,29 @@
   <div id="fx-layer" class="fx-layer" aria-hidden="true"></div>
   <div id="toast-layer" class="toast-layer" aria-live="polite" aria-atomic="false"></div>
 
+  <!-- full-screen feedback for a missed window -->
+  <div id="hit-flash" class="hit-flash" aria-hidden="true"></div>
+  <div id="bell-banner" class="bell-banner hidden" role="status" aria-live="assertive"></div>
+
+  <!-- ===================== SESSION DOCK =====================
+       Shown whenever a timed session is running, whatever tab you are on. -->
+  <aside id="session-dock" class="session-dock hidden">
+    <div class="dock-ring" id="dock-ring" style="--pct: 100">
+      <span class="dock-time" id="dock-time">00:00</span>
+    </div>
+    <div class="dock-body">
+      <span class="dock-task" id="dock-task">Quest</span>
+      <span class="dock-mode" id="dock-mode">Session</span>
+      <div class="dock-bar"><div class="dock-bar-fill" id="dock-bar-fill"></div></div>
+      <p class="dock-hint" id="dock-hint"></p>
+    </div>
+    <div class="dock-actions">
+      <button id="dock-finish" class="btn btn-primary" type="button">✓ Finished</button>
+      <button id="dock-abandon" class="btn btn-ghost btn-sm" type="button">Give up</button>
+      <button id="dock-bell" class="btn btn-ghost btn-sm" type="button">🔔</button>
+    </div>
+  </aside>
+
   <!-- ===================== ONBOARDING ===================== -->
   <section id="onboarding" class="onboarding hidden">
     <div class="onboarding-card">
@@ -90,6 +113,7 @@
                 <p class="hero-class" id="hero-class">Warrior · Level 1</p>
               </div>
             </div>
+            <div class="hp-block" id="hp-block"></div>
             <div class="hero-vitals" id="hero-vitals"></div>
           </div>
 

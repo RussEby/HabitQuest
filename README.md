@@ -62,6 +62,42 @@ Rewards are `base × difficulty × streak × daily`, so:
 
 A quest can only be completed once per day. That's the point.
 
+### Timed sessions
+
+A quest can also be a **timed session** with a countdown. When you start one, a
+timer HUD docks to the bottom of the screen and keeps running wherever you
+navigate, and a bell rings when the time is finished. There are two flavours,
+and they punish different things:
+
+| | **Beat the Clock** ⏱️ | **Stay the Course** 🛡️ |
+|---|---|---|
+| The rule | Finish **before** the bell | Keep at it for the **whole** time |
+| Example | Sweep the floor in 20 minutes | Read for 30 minutes |
+| Finishing early | The point of it — pays a **speed bonus** of +5% per 10% of the window left to spare (capped +60%) | Refused: *"Not yet — 12 minutes still to serve"* |
+| Running over | Too late: the bell rings, you **take a hit** | Allowed and encouraged — the timer counts up as overtime |
+| Reward | XP and gold, plus the speed bonus | XP and gold, plus a **+15% endurance bonus** |
+| Give up | Costs nothing, unless the bell already rang | Costs nothing, no reward |
+
+So the two modes ask different things of you: Beat the Clock is about *speed*,
+Stay the Course is about *not stopping early*.
+
+### Health, hits and healing
+
+Letting the bell catch you on a Beat the Clock quest is the one way to lose
+something in Habit Quest, so your hero has health:
+
+- **Max health** is `40 + 10 × VIT`, and VIT from equipped gear counts, so
+  armour really does protect you.
+- A missed window deals damage scaled by the quest's difficulty — 5% of max HP
+  on a Tiny quest up to 25% on an Epic one — and resets that quest's streak.
+- **Healing:** every completion mends a little, a new active day rests up 10%,
+  and a **level-up is a full heal**.
+- At **0 HP** your hero is **Wounded** and earns half gold until they recover.
+  It never blocks you from playing — it's a bruise, not a game over.
+
+If the window closes while your tab is shut, the server settles it when you next
+open the app and plays the hit then, so nothing is silently lost.
+
 ### Stats and skills
 
 Five abilities, each fed by the quests you tag with it:
@@ -104,7 +140,7 @@ habitquest/
   data.py               static content — stats, archetypes, 25 items, achievements, tunables
   engine.py             pure rules — XP curve, rewards, power, streaks, achievements
   store.py              SQLite persistence + full state assembly
-  api.py                JSON API routing
+  api.py                JSON API routing (including the timed-session routes)
   server.py             stdlib HTTP server (API + static assets, loopback only)
 static/
   index.html            the app shell: onboarding, topbar, four views, overlays
@@ -113,6 +149,7 @@ static/
 tests/
   test_engine.py        unit tests for the pure rules
   test_store.py         behavioural tests for persistence and the game loop
+  test_sessions.py      timed sessions, health, and legacy-save migration
   test_api.py           end-to-end tests over a real HTTP socket
 ```
 
@@ -127,8 +164,12 @@ The front end talks to a small JSON API; everything is also usable with `curl`.
 | `POST` | `/api/demo` | Seed a demo save |
 | `POST` | `/api/reset` | Wipe the save |
 | `POST` `PUT` `DELETE` | `/api/tasks` … `/api/tasks/{id}` | Manage quests |
-| `POST` | `/api/tasks/{id}/complete` | Complete it — returns rewards, level-up, unlocks |
+| `POST` | `/api/tasks/{id}/complete` | Complete an instant quest — returns rewards, level-up, unlocks |
 | `POST` | `/api/tasks/{id}/undo` | Roll back today's completion |
+| `GET` | `/api/session` | The running timed session, if any |
+| `POST` | `/api/tasks/{id}/session/start` | Start the clock on a timed quest |
+| `POST` | `/api/tasks/{id}/session/finish` | Finish it — `won`, or `hit` if the bell beat you |
+| `POST` | `/api/tasks/{id}/session/abandon` | Give up; no reward, no penalty |
 | `POST` | `/api/skills/upgrade` | Spend a point (`{stat, amount}`) |
 | `GET` `POST` | `/api/shop` … `/api/shop/buy` `equip` `unequip` | The Emporium |
 | `GET` | `/api/history?days=30` | Activity series and top quests |
@@ -139,8 +180,13 @@ Failures return HTTP 400 with `{"ok": false, "error": "why"}`.
 ### Data
 
 Everything is stored in one SQLite file (`habitquest.db` next to `app.py` by
-default) — character, quests, completions, inventory, equipment, achievements
-and the activity log. Delete it to start over, or move it to back up your hero.
+default) — character, quests, completions, timed sessions, inventory, equipment,
+achievements and the activity log. Delete it to start over, or move it to back
+up your hero.
+
+The schema migrates itself: a save written by an earlier version is upgraded in
+place on first open, keeping the hero and every logged completion. Old quests
+simply become instant quests.
 
 ---
 
@@ -150,11 +196,17 @@ and the activity log. Delete it to start over, or move it to back up your hero.
 python -m unittest discover -s tests -t .
 ```
 
-90 tests, standard library `unittest` only (no `pytest` install needed). They
+149 tests, standard library `unittest` only (no `pytest` install needed). They
 cover the XP curve and reward maths, streak rollovers, the complete/undo round
 trip, shop and skill rules, achievement unlocking, save/reopen persistence, and
 a full HTTP playthrough including error paths. The API tests talk to a real
 server on a real socket, so routing and content types are covered too.
+
+The session suite simulates elapsed time by moving a session's start timestamp
+instead of sleeping, so it stays fast: both modes won and lost, the bell being
+pressed *at* the buzzer, giving up before and after it, a window that closed
+while the tab was shut, damage and healing, and a legacy save being migrated
+from the version 1 schema.
 
 ---
 
@@ -162,5 +214,7 @@ server on a real socket, so routing and content types are covered too.
 
 - The server binds to `127.0.0.1` only. It is a personal, local app — don't put
   it on a public interface.
-- Everything works offline; there are no web fonts, CDNs or telemetry.
+- Everything works offline; there are no web fonts, CDNs or telemetry. The bell
+  is synthesised with the Web Audio API, so there are no sound files either (and
+  a blocked or unsupported audio context can never break the UI).
 - Respects `prefers-reduced-motion` and adapts down to phone widths.

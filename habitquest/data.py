@@ -229,6 +229,17 @@ ACHIEVEMENTS: list[dict] = [
     {"id": "perfect_week", "name": "Perfect Week", "icon": "🎯",
      "desc": "Finish at least one task every day for 7 days.",
      "goal": 7, "track": "longest_day_run"},
+    {"id": "first_session", "name": "On the Clock", "icon": "⏱️",
+     "desc": "Complete your first timed session.", "goal": 1, "track": "sessions_won"},
+    {"id": "time_lord", "name": "Time Lord", "icon": "⌛",
+     "desc": "Complete 25 timed sessions.", "goal": 25, "track": "sessions_won"},
+    {"id": "iron_will", "name": "Iron Will", "icon": "🛡️",
+     "desc": "Finish 10 Stay the Course sessions.", "goal": 10, "track": "endure_won"},
+    {"id": "swift", "name": "Swift", "icon": "⚡",
+     "desc": "Beat the clock with half the time to spare, five times.",
+     "goal": 5, "track": "swift_wins"},
+    {"id": "scarred", "name": "Scarred but Standing", "icon": "🩸",
+     "desc": "Win a timed session while wounded.", "goal": 1, "track": "wounded_wins"},
 ]
 
 ACHIEVEMENT_BY_ID: dict[str, dict] = {a["id"]: a for a in ACHIEVEMENTS}
@@ -256,6 +267,79 @@ DIFFICULTIES: list[dict] = [
 ]
 
 DIFFICULTY_BY_ID: dict[str, dict] = {d["id"]: d for d in DIFFICULTIES}
+
+# --------------------------------------------------------------------------
+# Timed sessions
+# --------------------------------------------------------------------------
+
+# A quest is either instant (tap to complete) or a timed session the hero has to
+# run against the clock.
+SESSION_MODES: list[dict] = [
+    {
+        "id": "instant",
+        "label": "Instant",
+        "icon": "⚡",
+        "timed": False,
+        "blurb": "Tick it off whenever it's done. No timer.",
+    },
+    {
+        "id": "beat_clock",
+        "label": "Beat the Clock",
+        "icon": "⏱️",
+        "timed": True,
+        "blurb": "Finish before the bell. Let it ring and you take a hit.",
+        "example": "Sweep the floor in 20 minutes.",
+    },
+    {
+        "id": "endure",
+        "label": "Stay the Course",
+        "icon": "🛡️",
+        "timed": True,
+        "blurb": "Keep at it for the whole time. Finish early and it doesn't count.",
+        "example": "Read for 30 minutes.",
+    },
+]
+
+SESSION_MODE_BY_ID: dict[str, dict] = {m["id"]: m for m in SESSION_MODES}
+TIMED_MODES: set[str] = {m["id"] for m in SESSION_MODES if m["timed"]}
+
+DURATION_PRESETS: list[int] = [5, 10, 15, 20, 25, 30, 45, 60, 90]
+SESSION_MIN_MINUTES = 1
+SESSION_MAX_MINUTES = 240
+
+# How far apart the hero's finish press and the deadline may be before the
+# server calls it. This only absorbs network/render latency; the countdown the
+# UI shows is driven by the server's own clock.
+SESSION_GRACE_SECONDS = 1.0
+
+# --------------------------------------------------------------------------
+# Health, hits and healing
+# --------------------------------------------------------------------------
+
+MAX_HP_BASE = 40
+MAX_HP_PER_VIT = 10
+
+# Fraction of maximum health lost when the bell catches you out.
+HIT_DAMAGE_PCT: dict[str, float] = {
+    "tiny": 0.05,
+    "easy": 0.08,
+    "normal": 0.12,
+    "hard": 0.18,
+    "epic": 0.25,
+}
+
+HEAL_PCT_PER_COMPLETION = 0.06    # every successful completion mends a little
+HEAL_MIN_PER_COMPLETION = 2
+REST_HEAL_PCT_PER_DAY = 0.10      # a new active day lets the hero recover
+WOUNDED_COIN_MULTIPLIER = 0.5     # at 0 HP, "Wounded": half gold until healed
+
+# --------------------------------------------------------------------------
+# Session reward bonuses
+# --------------------------------------------------------------------------
+
+SPEED_BONUS_PER_10_PCT_LEFT = 0.05   # Beat the Clock: reward for spare time
+SPEED_BONUS_CAP = 0.60
+ENDURE_BONUS = 0.15                  # Stay the Course: reward for the commitment
 
 # --------------------------------------------------------------------------
 # Tunables

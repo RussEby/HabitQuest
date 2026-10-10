@@ -14,6 +14,13 @@
   let shopFilter = 'all';
   let lastXpPercent = null;
   let pendingXpGain = 0;            // XP just earned, floated over the bar on next render
+  let clockOffset = 0;              // server time minus browser time, in milliseconds
+  let sessionTimer = null;          // dock tick loop, only alive while a session runs
+  let bellMuted = false;            // persisted under 'hq.bell'
+  let audioCtx = null;              // created lazily on the first real user gesture
+  let bannerTimer = null;
+  let hitFlashTimer = null;
+  const announcedSessions = {};     // session id -> its zero moment has been announced
 
   const STAT_COLORS = {
     str: '#ef4444',
@@ -169,6 +176,407 @@
       bit.style.background = i % 3 === 0 ? '#f5c451' : (i % 3 === 1 ? '#a855f7' : '#3b82f6');
       layer.appendChild(bit);
       window.setTimeout(function () { if (bit.parentNode) bit.parentNode.removeChild(bit); }, 2200);
+    }
+  }
+
+  /* ======================================================================
+     SESSIONS: CLOCK
+     The browser clock is never trusted for anything that matters - every
+     timestamp is measured against the server's own clock, which arrives in
+     each state payload as `server_now`.
+     ====================================================================== */
+  function syncClock(serverNow) {
+    const parsed = Date.parse(serverNow);
+    if (isFinite(parsed)) clockOffset = parsed - Date.now();
+  }
+
+  function nowMs() { return Date.now() + clockOffset; }
+
+  function minutesLabel(minutes) {
+    const m = Math.round(num(minutes, 0));
+    if (m <= 0) return '';
+    if (m < 60) return m + ' min';
+    const hours = Math.floor(m / 60);
+    const rest = m % 60;
+    return rest === 0 ? hours + ' hr' : hours + ' hr ' + rest + ' min';
+  }
+
+  function presetLabel(minutes) {
+    const m = num(minutes, 0);
+    if (m < 60) return m + 'm';
+    const hours = m / 60;
+    return (hours % 1 === 0 ? hours : hours.toFixed(1)) + 'h';
+  }
+
+  function clockText(seconds) {
+    const total = Math.max(0, Math.floor(num(seconds, 0)));
+    const hours = Math.floor(total / 3600);
+    const mins = Math.floor((total % 3600) / 60);
+    const secs = total % 60;
+    const body = String(mins).padStart(2, '0') + ':' + String(secs).padStart(2, '0');
+    return hours ? hours + ':' + body : body;
+  }
+
+  /* Live numbers for a session, derived from the server's own timestamps so a
+     refresh mid-countdown stays honest. Display only - the server decides. */
+  function sessionTiming(session) {
+    const duration = Math.max(0, num(session.duration_seconds, 0));
+    const started = Date.parse(session.started_at);
+    const ends = Date.parse(session.ends_at);
+    const now = nowMs();
+    let elapsed = isFinite(started) ? (now - started) / 1000 : num(session.elapsed_seconds, 0);
+    let remaining = isFinite(ends) ? (ends - now) / 1000 : duration - elapsed;
+    if (!isFinite(elapsed)) elapsed = 0;
+    if (!isFinite(remaining)) remaining = 0;
+    const overtime = remaining < 0;
+    const left = Math.max(0, remaining);
+    return {
+      duration: duration,
+      elapsed: Math.max(0, elapsed),
+      remaining: left,
+      overtime: overtime ? Math.abs(remaining) : 0,
+      over: overtime,
+      pct: duration > 0 ? clamp((left / duration) * 100, 0, 100) : 0,
+      urgent: left > 0 && (left <= 60 || (duration > 0 && left / duration <= 0.1)),
+    };
+  }
+
+  /* ======================================================================
+     SESSIONS: BELL
+     Synthesised with the Web Audio API: no audio files, so the app stays
+     offline-first. Every call is guarded - a blocked AudioContext must never
+     be able to break the interface.
+     ====================================================================== */
+  function readBellPref() {
+    try { bellMuted = window.localStorage.getItem('hq.bell') === 'muted'; }
+    catch (e) { bellMuted = false; }
+    const btn = $('#dock-bell');
+    if (btn) btn.textContent = bellMuted ? '🔕' : '🔔';
+  }
+
+  function setBellMuted(muted) {
+    bellMuted = !!muted;
+    try { window.localStorage.setItem('hq.bell', bellMuted ? 'muted' : 'on'); }
+    catch (e) { /* ignore */ }
+  }
+
+  function ensureAudio() {
+    if (audioCtx) return audioCtx;
+    try {
+      const Ctor = window.AudioContext || window.webkitAudioContext;
+      if (!Ctor) return null;
+      audioCtx = new Ctor();
+    } catch (e) { audioCtx = null; }
+    return audioCtx;
+  }
+
+  /* Call inside a real user gesture (a click) so autoplay policy is satisfied. */
+  function unlockAudio() {
+    const ctx = ensureAudio();
+    if (!ctx) return;
+    try { if (ctx.state === 'suspended' && ctx.resume) ctx.resume(); } catch (e) { /* ignore */ }
+  }
+
+  function strikeBell(ctx, when, freq, gain, decay) {
+    try {
+      const osc = ctx.createOscillator();
+      const amp = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, when);
+      amp.gain.setValueAtTime(0, when);
+      amp.gain.linearRampToValueAtTime(gain, when + 0.008);
+      amp.gain.exponentialRampToValueAtTime(0.0008, when + decay);
+      osc.connect(amp);
+      amp.connect(ctx.destination);
+      osc.start(when);
+      osc.stop(when + decay + 0.05);
+    } catch (e) { /* never let audio break the UI */ }
+  }
+
+  function ringBell(kind) {
+    if (bellMuted) return;
+    const ctx = ensureAudio();
+    if (!ctx) return;
+    try { if (ctx.state === 'suspended' && ctx.resume) ctx.resume(); } catch (e) { /* ignore */ }
+    let start;
+    try { start = ctx.currentTime + 0.02; } catch (e) { return; }
+
+    if (kind === 'served') {
+      // A pleasant rising chime: the time is served, go ahead and finish.
+      [523.25, 659.25, 783.99].forEach(function (freq, i) {
+        strikeBell(ctx, start + i * 0.16, freq, 0.16, 1.1);
+        strikeBell(ctx, start + i * 0.16, freq * 2, 0.05, 0.7);
+      });
+    } else {
+      // An alarming bell: inharmonic partials, struck three times.
+      for (let i = 0; i < 3; i++) {
+        const when = start + i * 1.0;
+        strikeBell(ctx, when, 880, 0.20, 0.9);
+        strikeBell(ctx, when, 1174.7, 0.13, 0.8);
+        strikeBell(ctx, when, 1760, 0.07, 0.6);
+      }
+    }
+  }
+
+  /* ======================================================================
+     SESSIONS: BANNER + HIT FEEDBACK
+     ====================================================================== */
+  function flashBanner(text, kind) {
+    const el = $('#bell-banner');
+    if (!el) return;
+    el.textContent = text;
+    el.classList.remove('hidden', 'times-up', 'done');
+    el.classList.add('show', kind === 'done' ? 'done' : 'times-up');
+    if (bannerTimer) window.clearTimeout(bannerTimer);
+    bannerTimer = window.setTimeout(function () {
+      el.classList.remove('show');
+      el.classList.add('hidden');
+    }, 4000);
+  }
+
+  /* Accepts an element or an already-measured rect, so a float can be aimed at
+     something that is about to disappear (the dock, once the session ends). */
+  function floatFrom(anchor, text, kind, dx, dy) {
+    let rect = null;
+    if (anchor && typeof anchor.getBoundingClientRect === 'function') {
+      rect = anchor.getBoundingClientRect();
+    } else if (anchor && typeof anchor.left === 'number') {
+      rect = anchor;
+    }
+    const x = rect ? rect.left + rect.width / 2 : window.innerWidth / 2;
+    const y = rect ? rect.top + rect.height / 2 : window.innerHeight / 2;
+    spawnFloat(text, kind,
+      clamp(x + dx, 8, window.innerWidth - 100),
+      clamp(y + dy, 8, window.innerHeight - 30));
+  }
+
+  function playHit(damage, name) {
+    const dmg = num(damage, 0);
+    const flash = $('#hit-flash');
+    if (flash) {
+      flash.classList.add('on');
+      if (hitFlashTimer) window.clearTimeout(hitFlashTimer);
+      hitFlashTimer = window.setTimeout(function () { flash.classList.remove('on'); }, 900);
+    }
+    const app = $('#app');
+    if (app) {
+      app.classList.add('shake');
+      window.setTimeout(function () { app.classList.remove('shake'); }, 700);
+    }
+    floatFrom($('#avatar') || $('#hp-block'), '-' + fmt(dmg) + ' HP', 'damage', -18, 0);
+    toast('💥 The bell caught you' + (name ? ' on ' + name : '') +
+      ' — you took ' + fmt(dmg) + ' damage.', 'error');
+  }
+
+  /* ======================================================================
+     SESSIONS: DOCK
+     Visible on every tab while a session runs, so the clock can never be
+     lost behind a view change.
+     ====================================================================== */
+  function ensureTicker() {
+    const needed = !!(state && state.has_character && state.session);
+    if (needed && !sessionTimer) sessionTimer = window.setInterval(tickDock, 200);
+    if (!needed && sessionTimer) {
+      window.clearInterval(sessionTimer);
+      sessionTimer = null;
+    }
+  }
+
+  function tickDock() {
+    if (!state || !state.session) return;
+    renderDock();
+  }
+
+  /* Live clocks on the quest cards, updated in place so the list never re-renders. */
+  function updateLiveClocks() {
+    const session = state && state.session;
+    if (!session) return;
+    const timing = sessionTiming(session);
+    const text = (timing.over ? '+' : '') + clockText(timing.over ? timing.overtime : timing.remaining);
+    $$('[data-live-for]').forEach(function (el) {
+      if (num(el.getAttribute('data-live-for'), 0) === num(session.task_id, 0)) {
+        el.textContent = text;
+      }
+    });
+  }
+
+  function seedAnnounced(session) {
+    if (!session) return;
+    // A session already past zero when we first see it (a page refreshed
+    // mid-overtime) must not re-ring the bell.
+    if (sessionTiming(session).over) announcedSessions[session.id] = true;
+  }
+
+  function renderDock() {
+    const dock = $('#session-dock');
+    if (!dock) return;
+    const session = (state && state.has_character && state.session) || null;
+
+    if (!session) {
+      dock.classList.add('hidden');
+      dock.classList.remove('beat_clock', 'endure', 'urgent', 'ready', 'overrun');
+      ensureTicker();
+      return;
+    }
+
+    const timing = sessionTiming(session);
+    const endure = session.mode === 'endure';
+
+    dock.classList.remove('hidden');
+    dock.classList.toggle('beat_clock', session.mode === 'beat_clock');
+    dock.classList.toggle('endure', endure);
+    dock.classList.toggle('urgent', timing.urgent);
+    dock.classList.toggle('ready', endure && timing.over);
+    dock.classList.toggle('overrun', timing.over);
+
+    const ring = $('#dock-ring');
+    if (ring) ring.style.setProperty('--pct', String(Math.round(timing.pct)));
+    const bar = $('#dock-bar-fill');
+    if (bar) bar.style.width = timing.pct + '%';
+    const time = $('#dock-time');
+    if (time) {
+      time.textContent = (timing.over ? '+' : '') +
+        clockText(timing.over ? timing.overtime : timing.remaining);
+    }
+
+    const taskEl = $('#dock-task');
+    if (taskEl) {
+      taskEl.textContent = (session.task_icon ? session.task_icon + ' ' : '') + session.task_name;
+    }
+    const modeEl = $('#dock-mode');
+    if (modeEl) {
+      modeEl.textContent = (session.mode_icon ? session.mode_icon + ' ' : '') + session.mode_label;
+    }
+
+    const hint = $('#dock-hint');
+    if (hint) {
+      if (endure) {
+        hint.textContent = timing.over
+          ? 'Time served — keep going as long as you like, then finish.'
+          : 'Stay with it for ' + minutesLabel(session.duration_minutes) + '. Finishing early will not count.';
+      } else {
+        hint.textContent = timing.over
+          ? 'The bell has rung — finishing now counts as a miss.'
+          : 'Finish before the bell to earn it. Let it ring and you take a hit.';
+      }
+    }
+
+    const finish = $('#dock-finish');
+    if (finish) finish.textContent = (endure && timing.over) ? '✓ Finish now' : '✓ Finished';
+
+    // The zero moment: announce it exactly once per session.
+    if (timing.over && !announcedSessions[session.id]) {
+      announcedSessions[session.id] = true;
+      if (endure) {
+        ringBell('served');
+        flashBanner('TIME SERVED', 'done');
+      } else {
+        ringBell('times-up');
+        flashBanner("TIME'S UP", 'times-up');
+      }
+    }
+
+    updateLiveClocks();
+    ensureTicker();
+  }
+
+  /* ======================================================================
+     SESSIONS: HEALTH
+     ====================================================================== */
+  function renderHealth() {
+    const host = $('#hp-block');
+    if (!host) return;  // see renderHero(): this is the only health readout
+    const c = (state && state.character) || null;
+    if (!c || !state.has_character) { host.innerHTML = ''; return; }
+
+    const pct = clamp(num(c.hp_pct, 0) * 100, 0, 100);
+    host.classList.toggle('downed', !!c.downed);
+    host.innerHTML =
+      '<div class="hp-head">' +
+      '<span class="hp-label">❤️ Health</span>' +
+      '<span class="hp-value">' + fmt(c.hp) + ' / ' + fmt(c.max_hp) + '</span>' +
+      (c.downed ? '<span class="hp-chip wounded">WOUNDED</span>' : '') +
+      '</div>' +
+      // .hp-bar-track is the fixed-height groove and .hp-bar is the inner
+      // full-height bar, which is the nesting the stylesheet expects.
+      '<div class="hp-bar-track' + (c.downed ? ' downed' : '') +
+      '" role="progressbar" aria-label="Health">' +
+      '<div class="hp-bar"><div class="hp-bar-fill" style="width:' + pct + '%"></div></div>' +
+      '</div>';
+  }
+
+  /* ======================================================================
+     SESSIONS: ACTIONS
+     ====================================================================== */
+  async function startSession(id) {
+    unlockAudio();   // this click is the gesture that lets the bell play later
+    try {
+      const res = await api('POST', '/api/tasks/' + id + '/session/start');
+      applyState(res.state);
+      const s = res.session || {};
+      toast('⏱ ' + (s.task_name || 'Session') + ' — ' + minutesLabel(s.duration_minutes) +
+        ' of ' + (s.mode_label || 'timed work') + '.', 'gold');
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  }
+
+  async function finishSession() {
+    const session = state && state.session;
+    if (!session) return;
+    // Measure the dock before the state lands and hides it.
+    const anchorEl = $('#dock-finish');
+    const anchor = anchorEl ? anchorEl.getBoundingClientRect() : null;
+    unlockAudio();
+    try {
+      const res = await api('POST', '/api/tasks/' + session.task_id + '/session/finish');
+
+      if (res.outcome === 'hit') {
+        applyState(res.state);
+        playHit(res.damage, session.task_name);
+        return;
+      }
+
+      const r = res.rewards || {};
+      pendingXpGain = num(r.xp, 0);
+      applyState(res.state);
+
+      floatFrom(anchor, '+' + fmt(r.xp) + ' XP', 'xp', -18, -6);
+      floatFrom(anchor, '+' + fmt(r.coins) + ' gold', 'coin', 16, 20);
+
+      let msg = 'Session complete · +' + fmt(r.xp) + ' XP · +' + fmt(r.coins) + ' gold';
+      if (num(r.speed_bonus, 0) > 0) msg += ' · ' + Math.round(num(r.speed_bonus, 0) * 100) + '% time to spare';
+      if (num(r.endure_bonus, 0) > 0) msg += ' · +' + Math.round(num(r.endure_bonus, 0) * 100) + '% endurance bonus';
+      if (r.wounded) msg += ' · wounded (half gold)';
+      toast(msg, 'success');
+
+      const unlocked = res.unlocked || [];
+      if (res.level_up) {
+        showLevelUp(res.level_up, unlocked);
+      } else {
+        unlocked.forEach(function (a, i) {
+          window.setTimeout(function () {
+            toast('Achievement unlocked: ' + a.name, 'gold');
+          }, 350 + i * 450);
+        });
+      }
+    } catch (err) {
+      // 'Not yet - N minutes still to serve.' Keep the session running.
+      toast(err.message, 'error');
+      refresh();
+    }
+  }
+
+  async function giveUpSession() {
+    const session = state && state.session;
+    if (!session) return;
+    try {
+      const res = await api('POST', '/api/tasks/' + session.task_id + '/session/abandon');
+      applyState(res.state);
+      if (res.outcome === 'hit') playHit(res.damage, session.task_name);
+      else toast('Session given up — no reward, no penalty.', 'info');
+    } catch (err) {
+      toast(err.message, 'error');
     }
   }
 
@@ -351,13 +759,16 @@
     $('#hero-class').textContent = (c.archetype_icon ? c.archetype_icon + ' ' : '') +
       c.archetype_name + ' · Level ' + c.level;
 
+    // Health lives in #hp-block above (label, bar and WOUNDED chip), so it is
+    // deliberately not repeated as a vitals tile here.
     $('#hero-vitals').innerHTML = [
-      ['Power', fmt(c.power)],
-      ['Gold', '💰 ' + fmt(c.coins)],
-      ['Quests done', fmt(c.total_completions)],
-      ['Best streak', fmt(c.best_day_streak) + 'd'],
+      ['Power', fmt(c.power), ''],
+      ['Gold', '💰 ' + fmt(c.coins), ''],
+      ['Quests done', fmt(c.total_completions), ''],
+      ['Best streak', fmt(c.best_day_streak) + 'd', ''],
     ].map(function (row) {
-      return '<div class="vital"><span class="vital-label">' + row[0] + '</span>' +
+      return '<div class="vital' + (row[2] ? ' ' + row[2] : '') + '">' +
+        '<span class="vital-label">' + row[0] + '</span>' +
         '<span class="vital-value">' + row[1] + '</span></div>';
     }).join('');
 
@@ -427,8 +838,10 @@
     for (let i = 0; i < series.length; i++) if (series[i].day === today) todayXp = num(series[i].xp, 0);
 
     $('#day-ring-value').textContent = doneCount + '/' + tasks.length;
+    const timedCount = tasks.filter(function (t) { return t.is_timed; }).length;
     $('#task-summary').textContent = tasks.length
-      ? doneCount + ' of ' + tasks.length + ' quests done today · +' + fmt(todayXp) + ' XP banked today'
+      ? doneCount + ' of ' + tasks.length + ' quests done today · +' + fmt(todayXp) + ' XP banked today' +
+        (timedCount ? ' · ' + timedCount + ' timed' : '')
       : 'No quests yet — add your first habit and start earning.';
 
     if (!tasks.length) {
@@ -453,11 +866,34 @@
         meta.push('<span class="hint">×' + num(t.difficulty_multiplier, 1) + ' difficulty</span>');
       }
 
+      const running = !!(state.session && num(state.session.task_id, 0) === num(t.id, 0));
+      if (t.is_timed) {
+        meta.push('<span class="mode-tag ' + esc(t.mode) + '">' + esc(t.mode_icon) + ' ' +
+          esc(t.mode_label) + '</span>');
+        meta.push('<span class="duration-chip">⏱ ' + esc(t.duration_label) + '</span>');
+      }
+      if (running) {
+        const live = sessionTiming(state.session);
+        // Updated in place by the tick loop, so the list never re-renders.
+        meta.push('<span class="duration-chip task-live" data-live-for="' + t.id + '">' +
+          (live.over ? '+' : '') + clockText(live.over ? live.overtime : live.remaining) + '</span>');
+      }
+      if (num(t.sessions_lost, 0) > 0) {
+        meta.push('<span class="hint">💥 ' + fmt(t.sessions_lost) + ' hit' +
+          (num(t.sessions_lost, 0) === 1 ? '' : 's') + '</span>');
+      }
+
       const actions = [];
       if (t.completed_today) {
         actions.push('<span class="task-done-badge">✓ Done today</span>');
         actions.push('<button type="button" class="btn btn-ghost btn-sm task-undo" ' +
           'data-action="undo" data-id="' + t.id + '" title="Undo today\'s completion">↩</button>');
+      } else if (running) {
+        actions.push('<span class="task-done-badge">⏱ In progress</span>');
+      } else if (t.is_timed) {
+        actions.push('<button type="button" class="btn btn-primary btn-sm task-start ' +
+          esc(t.mode) + '" data-action="start-session" data-id="' + t.id + '" title="' +
+          esc(t.mode_blurb || '') + '">▶ Start ' + esc(t.duration_label) + '</button>');
       } else {
         actions.push('<button type="button" class="btn btn-primary btn-sm task-check" ' +
           'data-action="complete" data-id="' + t.id + '">✓ Complete</button>');
@@ -468,6 +904,7 @@
         'data-action="delete" data-id="' + t.id + '" title="Delete quest">🗑</button>');
 
       return '<article class="task-card' + (t.completed_today ? ' done' : '') +
+        (running ? ' session-running' : '') +
         '" data-id="' + t.id + '" style="--task-color:' + esc(colour) + '">' +
         '<div class="task-icon" style="color:' + esc(colour) + '">' + esc(t.icon) + '</div>' +
         '<div class="task-body">' +
@@ -651,7 +1088,12 @@
     else if (activeTab === 'journal') renderJournal();
   }
 
-  function refresh() { renderChrome(); renderActiveView(); }
+  function refresh() {
+    renderChrome();
+    renderActiveView();
+    renderDock();
+    renderHealth();
+  }
 
   function setTab(tab) {
     if (!TAB_LABEL[tab]) return;
@@ -668,16 +1110,27 @@
 
   function applyState(next) {
     state = next || {};
+    if (state.server_now) syncClock(state.server_now);
+
     if (!state.has_character) {
       $('#onboarding').classList.remove('hidden');
       $('#app').classList.add('hidden');
       renderOnboarding();
+      renderDock();          // hides the dock and stops the tick loop
       return;
     }
     $('#onboarding').classList.add('hidden');
     $('#app').classList.remove('hidden');
     if (!selectedArchetype) selectedArchetype = state.character.archetype;
+
+    seedAnnounced(state.session);
     refresh();
+
+    // Hits the server resolved while we were away are replayed here.
+    (state.settled || []).forEach(function (item) {
+      const task = (state.tasks || []).filter(function (t) { return t.id === item.task_id; })[0];
+      playHit(item.damage, task ? task.name : '');
+    });
   }
 
   /* ======================================================================
@@ -689,9 +1142,16 @@
     const icons = meta.icons || ['📚'];
     const colors = meta.colors || ['#f59e0b'];
     const difficulties = meta.difficulties || [{ id: 'easy', label: 'Easy', multiplier: 1 }];
+    const modes = meta.session_modes ||
+      [{ id: 'instant', label: 'Instant', icon: '⚡', timed: false, blurb: 'No timer.' }];
+    const presets = meta.duration_presets || [5, 10, 15, 20, 30, 45, 60];
+    const minMinutes = num(meta.session_min_minutes, 1) || 1;
+    const maxMinutes = num(meta.session_max_minutes, 240) || 240;
 
     const icon = (task && task.icon) || icons[0];
     const color = (task && task.color) || colors[0];
+    const mode = (task && task.mode) || 'instant';
+    const duration = clamp(num(task && task.duration_minutes, 0) || 20, minMinutes, maxMinutes);
 
     const body = '' +
       '<form id="hq-task-form" class="form-grid" autocomplete="off">' +
@@ -730,6 +1190,32 @@
       num(task ? task.coins : 8, 8) + '"></label>' +
       '</div>' +
 
+      '<div class="form-row"><div class="field"><span class="field-label">Session type</span>' +
+      '<div class="mode-picker" id="hq-mode-picker">' +
+      modes.map(function (m) {
+        return '<button type="button" class="mode-card' + (m.id === mode ? ' selected' : '') +
+          '" data-action="pick-mode" data-mode="' + esc(m.id) + '">' +
+          '<span class="mode-icon">' + esc(m.icon) + '</span>' +
+          '<span class="mode-name">' + esc(m.label) + '</span>' +
+          '<span class="mode-blurb">' + esc(m.blurb) + '</span>' +
+          (m.example ? '<span class="mode-example">e.g. ' + esc(m.example) + '</span>' : '') +
+          '</button>';
+      }).join('') + '</div></div></div>' +
+
+      '<div class="form-row"><div class="field duration-wrap' +
+      (mode === 'instant' ? ' hidden' : '') + '" id="hq-duration-wrap">' +
+      '<span class="field-label">Session length</span>' +
+      '<div class="duration-row" id="hq-duration-presets">' +
+      presets.map(function (m) {
+        return '<button type="button" class="duration-preset' +
+          (num(m, 0) === duration ? ' active' : '') + '" data-action="pick-duration" ' +
+          'data-minutes="' + num(m, 0) + '">' + esc(presetLabel(m)) + '</button>';
+      }).join('') + '</div>' +
+      '<input id="hq-task-duration" class="input duration-input" type="number" min="' +
+      minMinutes + '" max="' + maxMinutes + '" step="1" value="' + duration + '" ' +
+      'aria-label="Session length in minutes">' +
+      '</div></div>' +
+
       '<div class="form-row"><div class="field"><span class="field-label">Icon</span>' +
       '<div class="icon-picker" id="hq-icon-picker">' +
       icons.map(function (i) {
@@ -758,6 +1244,15 @@
       const form = $('#hq-task-form');
       form._icon = icon;
       form._color = color;
+      form._mode = mode;
+      form._duration = duration;
+
+      function modeInfo() {
+        for (let i = 0; i < modes.length; i++) {
+          if (modes[i].id === form._mode) return modes[i];
+        }
+        return modes[0] || { id: 'instant', label: 'Instant', timed: false };
+      }
 
       function preview() {
         const diff = $('#hq-task-diff').value;
@@ -767,16 +1262,53 @@
         }
         const xp = num($('#hq-task-xp').value, 0) * mult;
         const gold = num($('#hq-task-coins').value, 0) * mult;
-        $('#hq-reward-preview').textContent = 'Worth about ' + fmt(xp) + ' XP and ' + fmt(gold) +
+        let line = 'Worth about ' + fmt(xp) + ' XP and ' + fmt(gold) +
           ' gold per completion, before streak and daily bonuses.';
+        const info = modeInfo();
+        if (info.id === 'beat_clock') {
+          line += ' Beat the Clock pays a bonus for finishing early — miss the bell and you take a hit.';
+        } else if (info.id === 'endure') {
+          line += ' Stay the Course pays +15% for sitting the whole ' +
+            minutesLabel(form._duration) + '.';
+        }
+        $('#hq-reward-preview').textContent = line;
       }
+
+      function markPresets() {
+        $$('#hq-duration-presets .duration-preset').forEach(function (b) {
+          b.classList.toggle('active', num(b.dataset.minutes, 0) === num(form._duration, 0));
+        });
+      }
+
+      function syncMode() {
+        const wrap = $('#hq-duration-wrap');
+        if (wrap) wrap.classList.toggle('hidden', (form._mode || 'instant') === 'instant');
+        markPresets();
+        preview();
+      }
+
+      // The delegated click handler lives outside this closure, so the form
+      // carries the bits it needs - same pattern as _icon / _color above.
+      form._preview = preview;
+      form._syncMode = syncMode;
+
       preview();
+      markPresets();
       $('#hq-task-diff').addEventListener('change', preview);
       $('#hq-task-xp').addEventListener('input', preview);
       $('#hq-task-coins').addEventListener('input', preview);
+      const durationInput = $('#hq-task-duration');
+      if (durationInput) {
+        durationInput.addEventListener('input', function () {
+          form._duration = clamp(num(durationInput.value, 20), minMinutes, maxMinutes);
+          markPresets();
+          preview();
+        });
+      }
 
       form.addEventListener('submit', async function (ev) {
         ev.preventDefault();
+        const durationField = $('#hq-task-duration');
         const payload = {
           name: $('#hq-task-name').value.trim(),
           description: $('#hq-task-desc').value.trim(),
@@ -786,6 +1318,10 @@
           coins: num($('#hq-task-coins').value, 0),
           icon: form._icon,
           color: form._color,
+          mode: form._mode || 'instant',
+          duration_minutes: (form._mode || 'instant') === 'instant' ? 0
+            : clamp(num(durationField && durationField.value, form._duration || 20),
+                    minMinutes, maxMinutes),
         };
         if (!payload.name) { toast('Give your quest a name.', 'error'); return; }
         try {
@@ -937,6 +1473,10 @@
           doComplete(el.dataset.id, el);
           break;
 
+        case 'start-session':
+          startSession(num(el.dataset.id, 0));
+          break;
+
         case 'undo':
           act('/api/tasks/' + el.dataset.id + '/undo', undefined, 'Completion undone.', 'tasks');
           break;
@@ -1037,6 +1577,31 @@
           setTab(el.dataset.tab);
           break;
 
+        case 'pick-mode': {
+          const form = el.closest('#hq-task-form');
+          if (!form) break;
+          form._mode = el.dataset.mode;
+          $$('#hq-mode-picker .mode-card').forEach(function (b) {
+            b.classList.toggle('selected', b.dataset.mode === form._mode);
+          });
+          if (typeof form._syncMode === 'function') form._syncMode();
+          break;
+        }
+
+        case 'pick-duration': {
+          const form = el.closest('#hq-task-form');
+          if (!form) break;
+          const minutes = num(el.dataset.minutes, 20);
+          form._duration = minutes;
+          const input = $('#hq-task-duration');
+          if (input) input.value = minutes;
+          $$('#hq-duration-presets .duration-preset').forEach(function (b) {
+            b.classList.toggle('active', num(b.dataset.minutes, 0) === minutes);
+          });
+          if (typeof form._preview === 'function') form._preview();
+          break;
+        }
+
         case 'pick-icon': {
           const form = el.closest('#hq-task-form');
           if (form) form._icon = el.dataset.icon;
@@ -1084,6 +1649,23 @@
     const demoBtn = $('#demo-btn');
     if (demoBtn) demoBtn.addEventListener('click', function () { loadDemo(); });
 
+    /* session dock controls: static markup, so they carry no data-action */
+    const dockFinish = $('#dock-finish');
+    if (dockFinish) dockFinish.addEventListener('click', function () { finishSession(); });
+
+    const dockAbandon = $('#dock-abandon');
+    if (dockAbandon) dockAbandon.addEventListener('click', function () { giveUpSession(); });
+
+    const dockBell = $('#dock-bell');
+    if (dockBell) {
+      dockBell.addEventListener('click', function () {
+        unlockAudio();
+        setBellMuted(!bellMuted);
+        dockBell.textContent = bellMuted ? '🔕' : '🔔';
+        if (!bellMuted) ringBell('served');   // a confirmation chime you can actually hear
+      });
+    }
+
     $('#new-task-btn').addEventListener('click', function () { openTaskModal(null); });
     $('#reset-btn').addEventListener('click', function () {
       confirmModal('Reset your save?',
@@ -1123,6 +1705,7 @@
      ====================================================================== */
   async function boot() {
     bindEvents();
+    readBellPref();
 
     try {
       const remembered = window.localStorage.getItem('hq.heroName');
@@ -1131,7 +1714,8 @@
 
     try {
       const initial = await api('GET', '/api/state');
-      applyState(initial);
+      applyState(initial);        // restores the dock if a session is mid-countdown
+      ensureTicker();
     } catch (err) {
       toast(err.message || 'Could not load your save.', 'error');
       const meta = { archetypes: [], stats: [], icons: [], colors: [], difficulties: [] };

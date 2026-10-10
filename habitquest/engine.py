@@ -7,7 +7,7 @@ testable (see ``tests/test_engine.py``).
 from __future__ import annotations
 
 import math
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Iterable
 
 from . import data as D
@@ -146,6 +146,95 @@ def available_skill_points(level: int, stats: dict, base_stats: dict) -> int:
 
 
 # --------------------------------------------------------------------------
+# Timed sessions
+# --------------------------------------------------------------------------
+
+def speed_bonus(elapsed_seconds: float, duration_seconds: float) -> float:
+    """Beat the Clock: reward for finishing with time to spare.
+
+    Worth ``SPEED_BONUS_PER_10_PCT_LEFT`` for every tenth of the window still
+    on the clock, capped so a very short sprint can't dwarf the quest itself.
+    """
+    if duration_seconds <= 0:
+        return 0.0
+    remaining = max(0.0, float(duration_seconds) - float(elapsed_seconds))
+    tenths_left = remaining / (float(duration_seconds) / 10.0)
+    return min(tenths_left * D.SPEED_BONUS_PER_10_PCT_LEFT, D.SPEED_BONUS_CAP)
+
+
+def session_bonus(mode: str, elapsed_seconds: float, duration_seconds: float) -> float:
+    """The mode-specific bonus multiplier minus one (0.0 means no bonus)."""
+    if mode == "beat_clock":
+        return speed_bonus(elapsed_seconds, duration_seconds)
+    if mode == "endure":
+        return D.ENDURE_BONUS
+    return 0.0
+
+
+def session_rewards(task: dict, streak: int, is_first_today: bool, mode: str,
+                    elapsed_seconds: float, duration_seconds: float) -> dict:
+    """Full payout for a finished timed session, before any wounded penalty."""
+    rewards = compute_rewards(task, streak, is_first_today)
+    bonus = session_bonus(mode, elapsed_seconds, duration_seconds)
+    rewards["xp"] = int(round(rewards["xp"] * (1.0 + bonus)))
+    rewards["coins"] = int(round(rewards["coins"] * (1.0 + bonus)))
+    rewards["session_bonus"] = round(bonus, 3)
+    rewards["speed_bonus"] = round(bonus, 3) if mode == "beat_clock" else 0.0
+    rewards["endure_bonus"] = round(bonus, 3) if mode == "endure" else 0.0
+    return rewards
+
+
+def apply_wounded_penalty(rewards: dict, wounded: bool) -> dict:
+    """A hero on 0 HP earns less gold until they recover."""
+    if not wounded:
+        return rewards
+    out = dict(rewards)
+    out["coins"] = int(round(rewards["coins"] * D.WOUNDED_COIN_MULTIPLIER))
+    out["wounded"] = True
+    return out
+
+
+def session_outcome(mode: str, elapsed_seconds: float, duration_seconds: float,
+                    grace: float = D.SESSION_GRACE_SECONDS) -> str:
+    """Classify a finish attempt without touching storage.
+
+    Returns ``"won"``, ``"hit"`` (Beat the Clock ran out) or ``"too_early"``
+    (Stay the Course tried to finish before the time was served).
+    """
+    elapsed = max(0.0, float(elapsed_seconds))
+    duration = max(0.0, float(duration_seconds))
+    if mode == "beat_clock":
+        return "won" if elapsed <= duration + grace else "hit"
+    if mode == "endure":
+        return "won" if elapsed + grace >= duration else "too_early"
+    return "won"
+
+
+# --------------------------------------------------------------------------
+# Health
+# --------------------------------------------------------------------------
+
+def max_hp(stats: dict) -> int:
+    """Maximum health grows with Vitality."""
+    return D.MAX_HP_BASE + max(0, int(stats.get("vit", 0))) * D.MAX_HP_PER_VIT
+
+
+def hit_damage(difficulty: str, maximum_hp: int) -> int:
+    """Damage taken when the bell catches you out, scaled by difficulty."""
+    pct = D.HIT_DAMAGE_PCT.get(difficulty, D.HIT_DAMAGE_PCT["easy"])
+    return max(1, int(round(max(1, int(maximum_hp)) * pct)))
+
+
+def heal_per_completion(maximum_hp: int) -> int:
+    return max(D.HEAL_MIN_PER_COMPLETION,
+               int(round(max(1, int(maximum_hp)) * D.HEAL_PCT_PER_COMPLETION)))
+
+
+def rest_heal(maximum_hp: int) -> int:
+    return max(1, int(round(max(1, int(maximum_hp)) * D.REST_HEAL_PCT_PER_DAY)))
+
+
+# --------------------------------------------------------------------------
 # Streaks / calendar helpers
 # --------------------------------------------------------------------------
 
@@ -182,6 +271,28 @@ def longest_day_run(dates: Iterable[str]) -> int:
         run = run + 1 if (cur - prev).days == 1 else 1
         best = max(best, run)
     return best
+
+
+def now_stamp() -> str:
+    """Timestamp with sub-second precision, used for session deadlines."""
+    return datetime.now().isoformat(timespec="milliseconds")
+
+
+def parse_stamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except (ValueError, TypeError):
+        return None
+
+
+def seconds_between(start: str | None, end: str | None) -> float:
+    """Whole seconds from ``start`` to ``end`` (never negative)."""
+    first, second = parse_stamp(start), parse_stamp(end)
+    if first is None or second is None:
+        return 0.0
+    return max(0.0, (second - first).total_seconds())
 
 
 def date_range(days: int, end: str | None = None) -> list[str]:

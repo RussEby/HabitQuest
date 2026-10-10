@@ -42,6 +42,11 @@ class Api:
         self._route("POST", r"/api/tasks/(\d+)/complete", self._complete_task)
         self._route("POST", r"/api/tasks/(\d+)/undo", self._undo_task)
 
+        self._route("GET", r"/api/session", lambda m, q, b: (200, {"session": g.active_session()}))
+        self._route("POST", r"/api/tasks/(\d+)/session/start", self._start_session)
+        self._route("POST", r"/api/tasks/(\d+)/session/finish", self._finish_session)
+        self._route("POST", r"/api/tasks/(\d+)/session/abandon", self._abandon_session)
+
         self._route("POST", r"/api/skills/upgrade", self._upgrade_stat)
 
         self._route("POST", r"/api/shop/buy", self._buy)
@@ -80,6 +85,15 @@ class Api:
 
     def _undo_task(self, m, q, body):
         return 200, self.game.undo_task(int(m.group(1)))
+
+    def _start_session(self, m, q, body):
+        return 200, self.game.start_session(int(m.group(1)))
+
+    def _finish_session(self, m, q, body):
+        return 200, self.game.finish_session(int(m.group(1)))
+
+    def _abandon_session(self, m, q, body):
+        return 200, self.game.abandon_session(int(m.group(1)))
 
     def _upgrade_stat(self, m, q, body):
         stat = body.get("stat", "")
