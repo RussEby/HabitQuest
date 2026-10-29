@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import re
 from typing import Callable
 
+from . import data as D
 from .store import Game, GameError
 
 
@@ -22,6 +25,7 @@ class Api:
         g = self.game
 
         self._route("GET", r"/api/state", lambda m, q, b: (200, g.state()))
+        self._route("GET", r"/api/day", lambda m, q, b: (200, g.day_probe()))
         self._route("GET", r"/api/tasks", lambda m, q, b: (200, {"tasks": g.list_tasks()}))
         self._route("GET", r"/api/shop", lambda m, q, b: (200, {"shop": g.shop_list()}))
         self._route("GET", r"/api/achievements",
@@ -31,6 +35,14 @@ class Api:
         self._route("GET", r"/api/history",
                     lambda m, q, b: (200, g.history(int(q.get("days", 30)))))
 
+        self._route("GET", r"/api/settings", lambda m, q, b: (200, {"settings": g.settings()}))
+        self._route("PUT", r"/api/settings", self._update_settings)
+        self._route("PATCH", r"/api/settings", self._update_settings)
+        self._route("PUT", r"/api/settings/sound", self._save_alarm)
+        self._route("DELETE", r"/api/settings/sound", self._clear_alarm)
+
+        self._route("GET", r"/api/character/export",
+                    lambda m, q, b: (200, g.character_export()))
         self._route("POST", r"/api/character", self._create_character)
         self._route("POST", r"/api/demo", self._demo)
         self._route("POST", r"/api/reset", self._reset)
@@ -41,11 +53,20 @@ class Api:
         self._route("DELETE", r"/api/tasks/(\d+)", self._delete_task)
         self._route("POST", r"/api/tasks/(\d+)/complete", self._complete_task)
         self._route("POST", r"/api/tasks/(\d+)/undo", self._undo_task)
+        self._route("POST", r"/api/tasks/(\d+)/skip", self._skip_task)
+        self._route("POST", r"/api/tasks/(\d+)/unskip", self._unskip_task)
+        self._route("POST", r"/api/tasks/(\d+)/archive", self._archive_task)
+        self._route("POST", r"/api/tasks/(\d+)/unarchive", self._unarchive_task)
 
         self._route("GET", r"/api/session", lambda m, q, b: (200, {"session": g.active_session()}))
         self._route("POST", r"/api/tasks/(\d+)/session/start", self._start_session)
         self._route("POST", r"/api/tasks/(\d+)/session/finish", self._finish_session)
         self._route("POST", r"/api/tasks/(\d+)/session/abandon", self._abandon_session)
+        self._route("POST", r"/api/tasks/(\d+)/session/pause", self._pause_session)
+        self._route("POST", r"/api/tasks/(\d+)/session/resume", self._resume_session)
+        self._route("POST", r"/api/tasks/(\d+)/session/stop", self._stop_session)
+        self._route("POST", r"/api/tasks/(\d+)/session/pause-quest", self._pause_quest)
+        self._route("POST", r"/api/tasks/(\d+)/session/cycle", self._cycle_session)
 
         self._route("POST", r"/api/skills/upgrade", self._upgrade_stat)
 
@@ -86,6 +107,19 @@ class Api:
     def _undo_task(self, m, q, body):
         return 200, self.game.undo_task(int(m.group(1)))
 
+    def _skip_task(self, m, q, body):
+        reason = body.get("reason", "") if isinstance(body, dict) else ""
+        return 200, self.game.skip_task(int(m.group(1)), str(reason or ""))
+
+    def _unskip_task(self, m, q, body):
+        return 200, self.game.unskip_task(int(m.group(1)))
+
+    def _archive_task(self, m, q, body):
+        return 200, self.game.archive_task(int(m.group(1)))
+
+    def _unarchive_task(self, m, q, body):
+        return 200, self.game.unarchive_task(int(m.group(1)))
+
     def _start_session(self, m, q, body):
         return 200, self.game.start_session(int(m.group(1)))
 
@@ -94,6 +128,44 @@ class Api:
 
     def _abandon_session(self, m, q, body):
         return 200, self.game.abandon_session(int(m.group(1)))
+
+    def _pause_session(self, m, q, body):
+        return 200, self.game.pause_session(int(m.group(1)))
+
+    def _resume_session(self, m, q, body):
+        return 200, self.game.resume_session(int(m.group(1)))
+
+    def _stop_session(self, m, q, body):
+        final = bool(body.get("final"))
+        return 200, self.game.stop_pomodoro_session(int(m.group(1)), final=final)
+
+    def _cycle_session(self, m, q, body):
+        return 200, self.game._cycle_pomodoro_session(int(m.group(1)))
+
+    def _pause_quest(self, m, q, body):
+        return 200, self.game.pause_pomodoro_quest(int(m.group(1)))
+
+    def _update_settings(self, m, q, body):
+        return 200, {"ok": True, "settings": self.game.update_settings(body or {})}
+
+    def _save_alarm(self, m, q, body):
+        raw = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(raw, str) or not raw.strip():
+            raise GameError("No sound file was sent.")
+        # Base64 runs 4/3 of the payload; reject an oversized blob before decoding it.
+        if len(raw) > ((D.ALARM_MAX_BYTES + 2) // 3) * 4 + 8:
+            mb = D.ALARM_MAX_BYTES // (1024 * 1024)
+            raise GameError(f"Sound files are limited to {mb} MB.")
+        try:
+            payload = base64.b64decode(raw, validate=True)
+        except (binascii.Error, ValueError):
+            raise GameError("That sound file could not be read.")
+        settings = self.game.save_alarm_sound(
+            str(body.get("name") or ""), str(body.get("type") or ""), payload)
+        return 200, {"ok": True, "settings": settings}
+
+    def _clear_alarm(self, m, q, body):
+        return 200, {"ok": True, "settings": self.game.clear_alarm_sound()}
 
     def _upgrade_stat(self, m, q, body):
         stat = body.get("stat", "")

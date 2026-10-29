@@ -31,6 +31,8 @@
     </div>
     <div class="dock-actions">
       <button id="dock-finish" class="btn btn-primary" type="button">✓ Finished</button>
+      <button id="dock-pause" class="btn btn-ghost btn-sm hidden" type="button">⏸ Pause</button>
+      <button id="dock-pause-quest" class="btn btn-ghost btn-sm hidden" type="button">⏸ Pause quest</button>
       <button id="dock-abandon" class="btn btn-ghost btn-sm" type="button">Give up</button>
       <button id="dock-bell" class="btn btn-ghost btn-sm" type="button">🔔</button>
     </div>
@@ -82,9 +84,14 @@
         <button class="nav-btn" data-tab="tasks" type="button">Quests</button>
         <button class="nav-btn" data-tab="shop" type="button">Shop</button>
         <button class="nav-btn" data-tab="journal" type="button">Journal</button>
+        <button class="nav-btn" data-tab="settings" type="button">Settings</button>
       </nav>
 
       <div class="topbar-stats">
+        <button id="refresh-btn" class="refresh-btn" data-action="refresh" type="button"
+                title="Refresh — re-check today's quests" aria-label="Refresh today's quests">
+          <span class="refresh-icon" aria-hidden="true">⟳</span>
+        </button>
         <span class="chip level-chip" id="top-level" title="Level">Lv 1</span>
         <span class="chip coin-chip" id="top-coins" title="Gold">💰 0</span>
       </div>
@@ -115,6 +122,10 @@
             </div>
             <div class="hp-block" id="hp-block"></div>
             <div class="hero-vitals" id="hero-vitals"></div>
+            <button id="export-hero-btn" class="btn btn-ghost btn-sm hero-export" type="button"
+                    title="Download this hero as a JSON file for another app">
+              ⤓ Export hero sheet
+            </button>
           </div>
 
           <div class="card skills-card">
@@ -142,11 +153,11 @@
       <section class="view" id="view-tasks">
         <div class="view-head">
           <div>
-            <h2 class="view-title">Daily Quests</h2>
+            <h2 class="view-title">Your Quests</h2>
             <p class="view-sub" id="task-summary">No quests yet — add your first habit.</p>
           </div>
           <div class="view-actions">
-            <div class="day-ring" id="day-ring" title="Quests completed today">
+            <div class="day-ring" id="day-ring" title="Quests due today">
               <span class="day-ring-value" id="day-ring-value">0/0</span>
             </div>
             <button id="new-task-btn" class="btn btn-primary" type="button">＋ New Quest</button>
@@ -176,6 +187,8 @@
           <div>
             <h2 class="view-title">Journal</h2>
             <p class="view-sub">Thirty days of proof that you showed up.</p>
+            <p class="hint journal-note">Rest days do not break a streak — a day only counts
+              when at least one quest was scheduled for it.</p>
           </div>
           <button id="reset-btn" class="btn btn-danger btn-sm" type="button">Reset save</button>
         </div>
@@ -193,13 +206,61 @@
             <div id="top-tasks" class="top-tasks"></div>
           </div>
           <div class="card">
-            <h3 class="panel-title">Achievements</h3>
+            <div class="card-head">
+              <h3 class="panel-title">Achievements</h3>
+              <span class="hint" id="achievement-count">(0 / 0)</span>
+            </div>
             <div id="achievement-grid" class="achievement-grid"></div>
           </div>
         </div>
         <div class="card">
           <h3 class="panel-title">Adventure log</h3>
           <div id="activity-feed" class="feed"></div>
+        </div>
+      </section>
+
+      <!-- ---------------- SETTINGS ---------------- -->
+      <section class="view" id="view-settings">
+        <div class="view-head">
+          <div>
+            <h2 class="view-title">Settings</h2>
+            <p class="view-sub">Global preferences — they apply everywhere in the app.</p>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h3 class="panel-title">Alarm sound</h3>
+            <span class="hint" id="alarm-mute-note"></span>
+          </div>
+          <p class="hint alarm-lede">
+            Plays when a focus round ends, and again when a break ends and the next
+            round starts. The 🔔 button on the session dock mutes every alarm.
+          </p>
+
+          <div id="alarm-options" class="alarm-list" role="radiogroup" aria-label="Alarm sound"></div>
+
+          <label class="field alarm-volume">
+            <span class="field-label">Volume <span id="alarm-volume-value">70%</span></span>
+            <input id="alarm-volume" class="alarm-slider" type="range" min="0" max="100" step="5" value="70">
+          </label>
+
+          <div class="alarm-actions">
+            <button id="alarm-test" class="btn btn-primary" type="button" data-action="alarm-test">▶ Test sound</button>
+            <button id="alarm-pick" class="btn" type="button" data-action="alarm-pick">Choose a sound file…</button>
+            <button id="alarm-remove" class="btn btn-ghost hidden" type="button" data-action="alarm-remove">Remove custom file</button>
+          </div>
+          <input id="alarm-file" class="hidden" type="file"
+                 accept="audio/wav,audio/mpeg,audio/ogg,.wav,.mp3,.ogg">
+
+          <p class="hint" id="alarm-custom-name"></p>
+
+          <div class="alarm-note">
+            <p><b>Allowed files:</b> <span id="alarm-limits">WAV, MP3 or OGG, up to 2 MB.</span></p>
+            <p><b>Where it goes:</b> nowhere you have to manage. Picking a file copies it
+              into the app's own <code id="alarm-folder">sounds</code> folder next to your save
+              file, and it stays there until you replace or remove it.</p>
+          </div>
         </div>
       </section>
     </main>

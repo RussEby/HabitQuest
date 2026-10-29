@@ -553,8 +553,10 @@ class TestLegacySaveMigration(unittest.TestCase):
         game = Game(self.path)
         try:
             char = game.state()["character"]
-            # 40 base + 7 VIT * 10; the old 0 must be read as "not set yet".
-            self.assertEqual(char["max_hp"], D.MAX_HP_BASE + 7 * D.MAX_HP_PER_VIT)
+            # 40 base + 7 VIT * 10, plus the bonus for this hero's level;
+            # the old 0 must be read as "not set yet".
+            self.assertEqual(char["max_hp"], E.max_hp(
+                {"str": 5, "int": 4, "vit": 7, "agi": 6, "cha": 2}, char["level"]))
             self.assertEqual(char["hp"], char["max_hp"])
             self.assertFalse(char["downed"])
 
@@ -563,6 +565,16 @@ class TestLegacySaveMigration(unittest.TestCase):
             self.assertFalse(task["is_timed"])
             self.assertEqual(task["duration_minutes"], 0)
             self.assertEqual(task["sessions_won"], 0)
+            # Quests written before schedules existed run every day.
+            self.assertEqual(task["days_label"], "Every day")
+            self.assertTrue(task["due_today"])
+            # A quest written before repeats existed keeps going forever.
+            self.assertEqual(task["recurrences"], 0)
+            self.assertEqual(task["recurrences_done"], 0)
+            self.assertEqual(task["recurrence_label"], "Ongoing")
+            self.assertFalse(task["is_recurring"])
+            self.assertFalse(task["archived"])
+            self.assertEqual(game.state()["archive"], [])
         finally:
             game.close()
 
@@ -594,7 +606,7 @@ class TestLegacySaveMigration(unittest.TestCase):
         game = Game(self.path)
         try:
             row = game._one("SELECT value FROM meta WHERE key = 'schema_version'")
-            self.assertEqual(row["value"], "2")
+            self.assertEqual(row["value"], "7")
         finally:
             game.close()
 
@@ -697,6 +709,209 @@ class TestSessionApi(unittest.TestCase):
         status, payload = self.post(f"/api/tasks/{created['task']['id']}/session/finish")
         self.assertEqual(status, 400)
         self.assertIn("No session", payload["error"])
+
+
+
+class TestPomodoro(SessionTestBase):
+    """Pomodoro rounds: focus, break, repeat - scored by the rounds finished."""
+
+    def _task(self, **overrides):
+        payload = {"name": "Deep work", "xp": 20, "coins": 10, "mode": "pomodoro",
+                   "duration_minutes": 25, "break_minutes": 5}
+        payload.update(overrides)
+        return self.game.create_task(payload)
+
+    def test_start_reports_the_round_length_and_phase(self):
+        """The dock needs a real label: a missing one read 'Focus for undefined'."""
+        task = self._task()
+        self.game.start_session(task["id"])
+        pomo = self.game.active_session()["pomodoro"]
+
+        self.assertEqual(pomo["phase"], "pomodoro")
+        self.assertEqual(pomo["phase_label"], "Focus")
+        self.assertEqual(pomo["current_label"], "25 min")
+        self.assertEqual(pomo["completed"], 0)
+
+    def test_rounds_alternate_without_a_round_cap(self):
+        """Focus -> break -> focus, as many times as the hero keeps going."""
+        task = self._task()
+        self.game.start_session(task["id"])
+
+        seen = []
+        for _ in range(6):
+            session = self.game._cycle_pomodoro_session(task["id"])["session"]
+            seen.append((session["pomodoro"]["phase"],
+                         session["pomodoro"]["completed"],
+                         session["duration_seconds"]))
+
+        self.assertEqual(seen, [
+            ("break", 1, 5 * 60),
+            ("pomodoro", 1, 25 * 60),
+            ("break", 2, 5 * 60),
+            ("pomodoro", 2, 25 * 60),
+            ("break", 3, 5 * 60),
+            ("pomodoro", 3, 25 * 60),
+        ])
+        self.assertEqual(self.game.active_session()["pomodoro"]["current_label"], "25 min")
+
+    def test_the_break_uses_the_task_setting(self):
+        task = self._task(break_minutes=10)
+        self.game.start_session(task["id"])
+        session = self.game._cycle_pomodoro_session(task["id"])["session"]
+
+        self.assertEqual(session["pomodoro"]["phase"], "break")
+        self.assertEqual(session["pomodoro"]["current_label"], "10 min")
+        self.assertEqual(session["duration_seconds"], 600)
+
+    def test_a_pomodoro_without_a_break_setting_still_gets_one(self):
+        task = self._task(break_minutes=0)
+        self.game.start_session(task["id"])
+        session = self.game._cycle_pomodoro_session(task["id"])["session"]
+
+        self.assertEqual(session["pomodoro"]["phase"], "break")
+        self.assertEqual(session["duration_seconds"], D.POMODORO_DEFAULT_BREAK_MINUTES * 60)
+
+    def test_finishing_pays_for_every_completed_round(self):
+        task = self._task()
+        self.game.start_session(task["id"])
+        self.game._cycle_pomodoro_session(task["id"])   # round 1 done -> break
+        self.game._cycle_pomodoro_session(task["id"])   # break -> focus
+        self.game._cycle_pomodoro_session(task["id"])   # round 2 done -> break
+
+        result = self.game.stop_pomodoro_session(task["id"], final=True)
+
+        self.assertEqual(result["outcome"], "won")
+        rewards = result["rewards"]
+        self.assertEqual(rewards["pomodoro_rounds"], 2)
+        self.assertEqual(rewards["pomodoro_factor"], 1.5)
+        self.assertGreater(rewards["xp"], 20)
+        self.assertIsNone(self.game.active_session())
+
+        task_after = [t for t in self.game.list_tasks() if t["id"] == task["id"]][0]
+        self.assertTrue(task_after["completed_today"])
+        self.assertEqual(task_after["sessions_won"], 1)
+
+    def test_finishing_before_a_round_pays_nothing(self):
+        task = self._task()
+        self.game.start_session(task["id"])
+        before = self.game.state()["character"]["xp"]
+
+        result = self.game.stop_pomodoro_session(task["id"], final=True)
+
+        self.assertEqual(result["outcome"], "abandoned")
+        self.assertEqual(self.game.state()["character"]["xp"], before)
+        self.assertIsNone(self.game.active_session())
+
+    def test_the_finish_endpoint_scores_by_rounds_too(self):
+        """Both finish paths agree: a pomodoro is never paid as one timed session."""
+        task = self._task()
+        self.game.start_session(task["id"])
+        self.assertEqual(self.game.finish_session(task["id"])["outcome"], "abandoned")
+
+        self.game.start_session(task["id"])
+        self.game._cycle_pomodoro_session(task["id"])
+        result = self.game.finish_session(task["id"])
+
+        self.assertEqual(result["outcome"], "won")
+        self.assertEqual(result["rewards"]["pomodoro_rounds"], 1)
+
+    def test_editing_a_task_keeps_the_break_length(self):
+        task = self._task(break_minutes=5)
+        updated = self.game.update_task(task["id"], {"break_minutes": 8})
+        self.assertEqual(updated["break_minutes"], 8)
+
+    def test_pausing_the_timer_freezes_the_clock(self):
+        task = self._task()
+        self.game.start_session(task["id"])
+        paused = self.game.pause_session(task["id"])["session"]
+
+        self.assertTrue(paused["paused"])
+        self.assertGreater(paused["remaining_seconds"], 25 * 60 - 5)
+
+        # Wall-clock time passing must not move a frozen countdown.
+        old = (datetime.now() - timedelta(minutes=30)).isoformat(timespec="milliseconds")
+        self.game._conn.execute(
+            "UPDATE sessions SET started_at = ? WHERE status = 'active'", (old,))
+        self.game._conn.commit()
+
+        still = self.game.active_session()
+        self.assertTrue(still["paused"])
+        self.assertEqual(still["remaining_seconds"], paused["remaining_seconds"])
+
+    def test_resuming_the_timer_starts_from_the_frozen_point(self):
+        task = self._task()
+        self.game.start_session(task["id"])
+        paused = self.game.pause_session(task["id"])["session"]
+
+        resumed = self.game.resume_session(task["id"])["session"]
+
+        self.assertFalse(resumed["paused"])
+        self.assertAlmostEqual(resumed["remaining_seconds"], paused["remaining_seconds"],
+                               delta=2)
+
+    def test_pausing_the_quest_banks_completed_rounds(self):
+        task = self._task()
+        self.game.start_session(task["id"])
+        self.game._cycle_pomodoro_session(task["id"])   # round 1 banked
+
+        result = self.game.pause_pomodoro_quest(task["id"])
+
+        self.assertEqual(result["outcome"], "quest_paused")
+        self.assertEqual(result["rounds"], 1)
+        self.assertIsNone(self.game.active_session())
+
+        card = [t for t in self.game.list_tasks() if t["id"] == task["id"]][0]
+        self.assertTrue(card["pomodoro_paused"])
+        self.assertEqual(card["pomodoro_progress"], 1)
+        self.assertFalse(card["completed_today"])
+
+    def test_starting_again_continues_the_banked_quest(self):
+        task = self._task()
+        self.game.start_session(task["id"])
+        self.game._cycle_pomodoro_session(task["id"])   # round 1 -> break
+        self.game.pause_pomodoro_quest(task["id"])
+
+        again = self.game.start_session(task["id"])
+
+        self.assertEqual(again["outcome"], "resumed")
+        self.assertEqual(again["session"]["pomodoro"]["completed"], 1)
+        self.assertEqual(again["session"]["pomodoro"]["phase"], "break")
+
+        self.game._cycle_pomodoro_session(task["id"])   # break -> focus
+        self.game._cycle_pomodoro_session(task["id"])   # round 2 -> break
+        self.game.pause_pomodoro_quest(task["id"])
+
+        card = [t for t in self.game.list_tasks() if t["id"] == task["id"]][0]
+        self.assertEqual(card["pomodoro_progress"], 2)
+
+    def _finish_rounds(self, rounds, estimate):
+        task = self.game.create_task({
+            "name": f"{rounds} rounds against {estimate}", "xp": 20, "coins": 10,
+            "mode": "pomodoro", "duration_minutes": 25, "break_minutes": 5,
+            "pomodoro_sessions": estimate,
+        })
+        self.game.start_session(task["id"])
+        for _ in range(rounds - 1):
+            self.game._cycle_pomodoro_session(task["id"])   # focus -> break
+            self.game._cycle_pomodoro_session(task["id"])   # break -> focus
+        self.game._cycle_pomodoro_session(task["id"])       # last focus -> break
+        return self.game.stop_pomodoro_session(task["id"], final=True)["rewards"]
+
+    def test_finishing_on_the_estimate_pays_a_bonus(self):
+        exact = self._finish_rounds(3, 3)
+        self.assertEqual(exact["pomodoro_rounds"], 3)
+        self.assertEqual(exact["pomodoro_estimate"], 3)
+        self.assertEqual(exact["pomodoro_accuracy"], 1.5)
+
+        off = self._finish_rounds(3, 6)
+        self.assertEqual(off["pomodoro_accuracy"], 1.05)
+        self.assertLess(off["xp"], exact["xp"])
+
+    def test_a_quest_without_an_estimate_earns_no_accuracy_bonus(self):
+        rewards = self._finish_rounds(2, 0)
+
+        self.assertEqual(rewards["pomodoro_estimate"], 0)
+        self.assertEqual(rewards["pomodoro_accuracy"], 1.0)
 
 
 if __name__ == "__main__":

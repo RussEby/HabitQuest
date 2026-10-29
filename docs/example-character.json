@@ -1,0 +1,147 @@
+{
+  "format": "habitquest.character",
+  "format_version": 1,
+  "exported_at": "2026-10-28T18:24:05.512",
+  "source": {
+    "app": "Habit Quest",
+    "app_version": "1.0.0"
+  },
+  "stats_meta": [
+    {
+      "key": "str",
+      "label": "Strength",
+      "abbr": "STR",
+      "blurb": "Discipline and heavy lifting."
+    },
+    {
+      "key": "int",
+      "label": "Intellect",
+      "abbr": "INT",
+      "blurb": "Study, focus and deep work."
+    },
+    {
+      "key": "vit",
+      "label": "Vitality",
+      "abbr": "VIT",
+      "blurb": "Health, sleep and body care."
+    },
+    {
+      "key": "agi",
+      "label": "Agility",
+      "abbr": "AGI",
+      "blurb": "Speed, tidiness and quick wins."
+    },
+    {
+      "key": "cha",
+      "label": "Charisma",
+      "abbr": "CHA",
+      "blurb": "People, creativity and expression."
+    }
+  ],
+  "character": {
+    "uid": "4d12cdff-48ea-4da3-9f63-e64e9d0a96eb",
+    "name": "Rowan",
+    "created_at": "2026-10-28T23:00:41",
+    "archetype": {
+      "id": "ranger",
+      "name": "Ranger",
+      "icon": "🏹",
+      "color": "#22c55e",
+      "blurb": "Balanced and relentless. Endurance over everything.",
+      "base_stats": {
+        "agi": 5,
+        "vit": 5,
+        "str": 5,
+        "int": 2,
+        "cha": 1
+      }
+    },
+    "level": 6,
+    "xp": 2350,
+    "level_floor_xp": 2179,
+    "level_xp": 171,
+    "level_xp_needed": 1027,
+    "level_progress": 0.1665,
+    "next_level_xp": 3206,
+    "max_level": false,
+    "power": 146,
+    "skill_points": {
+      "available": 15,
+      "spent": 0
+    },
+    "stats": {
+      "base": {
+        "str": 5,
+        "int": 2,
+        "vit": 5,
+        "agi": 5,
+        "cha": 1
+      },
+      "gear": {
+        "str": 3,
+        "int": 0,
+        "vit": 1,
+        "agi": 0,
+        "cha": 0
+      },
+      "total": {
+        "str": 8,
+        "int": 2,
+        "vit": 6,
+        "agi": 5,
+        "cha": 1
+      }
+    },
+    "health": {
+      "hp": 90,
+      "max_hp": 150,
+      "pct": 0.6,
+      "wounded": false
+    },
+    "gold": {
+      "current": 640,
+      "earned": 2950
+    },
+    "equipment": {
+      "weapon": {
+        "id": "iron_sword",
+        "name": "Iron Sword",
+        "slot": "weapon",
+        "icon": "⚔️",
+        "rarity": "uncommon",
+        "rarity_label": "Uncommon",
+        "level_req": 2,
+        "price": 220,
+        "bonus": {
+          "str": 3
+        },
+        "bonus_text": "+3 STR",
+        "description": "Reliable steel for a disciplined hand."
+      },
+      "head": {
+        "id": "leather_cap",
+        "name": "Leather Cap",
+        "slot": "head",
+        "icon": "🧢",
+        "rarity": "common",
+        "rarity_label": "Common",
+        "level_req": 1,
+        "price": 50,
+        "bonus": {
+          "vit": 1
+        },
+        "bonus_text": "+1 VIT",
+        "description": "Keeps the sun - and excuses - out of your eyes."
+      },
+      "body": null,
+      "boots": null,
+      "accessory": null
+    },
+    "record": {
+      "quests_completed": 87,
+      "day_streak": 12,
+      "best_day_streak": 21,
+      "last_active_day": "2026-10-28"
+    }
+  }
+}

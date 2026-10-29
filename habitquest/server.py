@@ -9,9 +9,11 @@ from __future__ import annotations
 import json
 import mimetypes
 import posixpath
+import re
 import sys
 import threading
 import webbrowser
+from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -20,7 +22,18 @@ from .api import Api, dumps
 from .store import Game
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
-MAX_BODY = 256 * 1024
+# Requests are JSON, except an alarm upload: a 2 MB audio file arrives base64
+# encoded (about 2.8 MB), so the ceiling has to clear that.
+MAX_BODY = 4 * 1024 * 1024
+
+
+def export_filename(doc: dict) -> str:
+    """A readable, ASCII-only file name for a downloaded hero sheet."""
+    character = doc.get("character") or {}
+    name = str(character.get("name") or "hero")
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:40] or "hero"
+    day = str(doc.get("exported_at") or "")[:10] or date.today().isoformat()
+    return f"habit-quest-{slug}-{day}.json"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -55,6 +68,9 @@ class Handler(BaseHTTPRequestHandler):
         if length <= 0:
             return {}
         if length > MAX_BODY:
+            # The body stays unread, so this connection must not be reused for
+            # another request; the handler still answers with a clean 400.
+            self.close_connection = True
             return {}
         raw = self.rfile.read(length)
         try:
@@ -88,6 +104,29 @@ class Handler(BaseHTTPRequestHandler):
         query = {k: v[-1] for k, v in parse_qs(parsed.query).items()}
 
         if path.startswith("/api"):
+            if path == "/api/sound":
+                # The uploaded alarm is served as audio bytes, not JSON.
+                if method not in ("GET", "HEAD"):
+                    self._send_json(405, {"ok": False, "error": "Method not allowed"})
+                    return
+                sound = self.api.game.alarm_sound()
+                if sound is None:
+                    self._send_json(404, {"ok": False, "error": "No custom alarm sound."})
+                    return
+                data, ctype = sound
+                self._send(200, data, ctype, {"Accept-Ranges": "none"})
+                return
+            if path == "/api/character/export":
+                # A file download, so the browser is told what to call it.
+                status, payload = self.api.handle(method, path, query, {})
+                if status != 200:
+                    self._send_json(status, payload)
+                    return
+                self._send(status, dumps(payload).encode("utf-8"),
+                           "application/json; charset=utf-8",
+                           {"Content-Disposition":
+                            f'attachment; filename="{export_filename(payload)}"'})
+                return
             body = self._read_body() if method in ("POST", "PUT", "PATCH", "DELETE") else {}
             status, payload = self.api.handle(method, path, query, body)
             self._send_json(status, payload)

@@ -52,6 +52,27 @@ nohup.out
 *.swp
 *.swo
 
+# --- Desktop app (Electron) --------------------------------
+node_modules/
+desktop/out/
+desktop/release/
+# Old staging folder used by early builds of scripts/build-install.ps1.
+desktop/release-bundle/
+desktop/backend-dist/
+# The app icon is source, not build output (the generic build/ rule above
+# would otherwise swallow it).
+!desktop/build/
+!desktop/build/icon.png
+
+# --- Patch and scratch leftovers ---------------------------
+# Merge/patch byproducts and ad-hoc repair scripts never belong in a commit.
+*.orig
+*.fixed
+*.rej
+*.bak
+*.patch
+scratch-*
+
 # --- OS cruft ---------------------------------------------
 .DS_Store
 .DS_Store?

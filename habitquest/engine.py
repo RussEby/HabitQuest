@@ -214,9 +214,19 @@ def session_outcome(mode: str, elapsed_seconds: float, duration_seconds: float,
 # Health
 # --------------------------------------------------------------------------
 
-def max_hp(stats: dict) -> int:
-    """Maximum health grows with Vitality."""
-    return D.MAX_HP_BASE + max(0, int(stats.get("vit", 0))) * D.MAX_HP_PER_VIT
+def max_hp(stats: dict, level: int = 1) -> int:
+    """Maximum health grows with Vitality and with every level the hero earns.
+
+    The old two-argument form is preserved for migrations and tests: a missing
+    level simply means level 1.
+    """
+    return (D.MAX_HP_BASE + max(0, int(stats.get("vit", 0))) * D.MAX_HP_PER_VIT
+            + max(0, int(level) - 1) * D.MAX_HP_PER_LEVEL)
+
+
+def miss_damage(difficulty: str, maximum_hp: int) -> int:
+    """Damage for a daily habit that never happened, scaled by difficulty."""
+    return hit_damage(difficulty, maximum_hp)
 
 
 def hit_damage(difficulty: str, maximum_hp: int) -> int:
@@ -245,8 +255,177 @@ def parse_date(value: str) -> date | None:
         return None
 
 
-def next_streak(last_date: str | None, today: str, current: int) -> int:
-    """Where a task's streak lands when completed again today."""
+# --------------------------------------------------------------------------
+# Quest schedules
+# --------------------------------------------------------------------------
+
+# Stored schedules are the sorted ISO weekday numbers a quest is available on,
+# e.g. "1,2,3,4,5" for weekdays. An empty string means every day, which is how
+# saves written before scheduling existed are read.
+
+def days_list(value) -> list[int]:
+    """The weekday numbers (Mon=1 .. Sun=7) in a stored schedule."""
+    if value is None or value == "":
+        return list(D.WEEKDAY_IDS)
+    if isinstance(value, str):
+        parts = [p for p in value.replace(" ", "").split(",") if p]
+    elif isinstance(value, (list, tuple, set)):
+        parts = list(value)
+    else:
+        return list(D.WEEKDAY_IDS)
+    picked = set()
+    for part in parts:
+        try:
+            number = int(part)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= number <= 7:
+            picked.add(number)
+    return sorted(picked) or list(D.WEEKDAY_IDS)
+
+
+def normalise_days(value) -> str:
+    """Canonical storage for a schedule; every day is stored as ''. """
+    picked = days_list(value)
+    if len(picked) == 7:
+        return ""
+    return ",".join(str(n) for n in picked)
+
+
+def days_label(value) -> str:
+    """A short human label: "Every day", "Weekends", "Mon-Fri", ..."""
+    picked = days_list(value)
+    if len(picked) == 7:
+        return "Every day"
+    if picked == [1, 2, 3, 4, 5]:
+        return "Weekdays"
+    if picked == [6, 7]:
+        return "Weekends"
+    if len(picked) > 1 and picked[-1] - picked[0] == len(picked) - 1:
+        return f"{D.WEEKDAY_BY_ID[picked[0]]['label']}\u2013{D.WEEKDAY_BY_ID[picked[-1]]['label']}"
+    return ", ".join(D.WEEKDAY_BY_ID[n]["label"] for n in picked)
+
+
+def day_is_due(value, weekday: int) -> bool:
+    """Is a quest with this schedule available on ``weekday`` (Mon=1 .. Sun=7)?"""
+    return int(weekday) in days_list(value)
+
+
+def max_window(value) -> int:
+    """The longest finish window a schedule can allow without overlapping itself.
+
+    A quest's occurrence opens on a scheduled day and stays open for the window.
+    If the window reached the next scheduled day the two would be on the board at
+    once, so the window can be no longer than the shortest gap between starts: a
+    quest that runs every day has a window of one day, and a quest that runs on a
+    single weekday can stay open all week.
+    """
+    picked = days_list(value)
+    if not picked:
+        return 1                      # '' means every day: no room at all
+    if len(picked) == 1:
+        return 7
+    gaps = []
+    for index, start in enumerate(picked):
+        following = picked[(index + 1) % len(picked)]
+        gap = (following - start) % 7
+        gaps.append(gap or 7)
+    return max(1, min(gaps))
+
+
+def window_span(day, value, window: int = 1):
+    """The occurrence window covering ``day`` as ``(first_day, last_day)``.
+
+    Windows never overlap (see :func:`max_window`), so a day belongs to at most
+    one of them. ``None`` means no window is open that day: the quest is resting.
+    """
+    width = max(1, int(window or 1))
+    if not isinstance(day, date):
+        day = parse_date(day)
+        if day is None:
+            return None
+    for offset in range(width):
+        start = day - timedelta(days=offset)
+        if day_is_due(value, start.isoweekday()):
+            return start, start + timedelta(days=width - 1)
+    return None
+
+
+def window_start(day, value, window: int = 1):
+    """The day the occurrence covering ``day`` opened, or ``None``."""
+    span = window_span(day, value, window)
+    return span[0] if span else None
+
+
+def _skipped_set(days) -> frozenset[str]:
+    """Normalise a collection of skipped days into ISO date strings."""
+    if not days:
+        return frozenset()
+    if isinstance(days, str):
+        days = [days]
+    out = set()
+    for value in days:
+        parsed = value if isinstance(value, date) else parse_date(value)
+        if parsed is not None:
+            out.add(parsed.isoformat())
+    return frozenset(out)
+
+
+def _occurrences(dates: Iterable[str], schedule, window: int) -> list[date]:
+    """Collapse completion days into the occurrence each one closed.
+
+    One occurrence is one link in the chain, so finishing Tuesday's grace day
+    and then the same window again (which play cannot do, but old saves and
+    undos can) must not count twice.
+    """
+    width = max(1, int(window or 1))
+    starts = set()
+    for value in dates:
+        parsed = parse_date(value)
+        if parsed is None:
+            continue
+        span = window_span(parsed, schedule, width)
+        starts.add(span[0] if span else parsed)
+    return sorted(starts)
+
+
+def _window_gap_clear(prev: date, until: date, schedule, window: int,
+                      skipped: frozenset[str]) -> bool:
+    """True when no uncompleted occurrence window closed between two dates.
+
+    A streak is counted in occurrences, not calendar days: a quest with a
+    five-day window is still done on time when it is finished on the fourth day.
+    The window of the earlier date always ends in a completion, so it can never
+    break the run; any later window that closes before ``until`` uncompleted -
+    and was not skipped - does. Days outside a window, and days inside a window
+    that is still open, are rest days: they neither add nor break a streak.
+    """
+    width = max(1, int(window or 1))
+    span = window_span(prev, schedule, width)
+    grace_end = span[1] if span else prev + timedelta(days=width - 1)
+    day = prev + timedelta(days=1)
+    while day < until:
+        if day > grace_end:
+            closing = window_span(day, schedule, width)
+            if closing is not None and closing[1] == day:
+                covered = {(closing[0] + timedelta(days=i)).isoformat()
+                           for i in range(width)}
+                if not (covered & set(skipped)):
+                    return False
+        day += timedelta(days=1)
+    return True
+
+
+def next_streak(last_date: str | None, today: str, current: int,
+                schedule=None, skipped=None, window: int = 1) -> int:
+    """Where a task's streak lands when completed again today.
+
+    Days the quest is not scheduled on - and days it was skipped - are rest
+    days: they neither add to the streak nor break it, so a Mon-Fri habit keeps
+    its run over the weekend and a skipped Wednesday does not cost the chain.
+    A finish window pushes the same idea further out: an occurrence is only late
+    once its window has closed, however many days that takes.
+    """
     if not last_date:
         return 1
     last = parse_date(last_date)
@@ -256,21 +435,45 @@ def next_streak(last_date: str | None, today: str, current: int) -> int:
     delta = (now - last).days
     if delta <= 0:
         return max(1, int(current))          # already counted today
-    if delta == 1:
-        return max(1, int(current)) + 1      # chain continues
-    return 1                                  # chain broken, start over
+    if _window_gap_clear(last, now, schedule, window, _skipped_set(skipped)):
+        return max(1, int(current)) + 1      # chain continues across rest days
+    return 1                                  # an occurrence was missed
 
 
-def longest_day_run(dates: Iterable[str]) -> int:
-    """Longest run of consecutive calendar days present in ``dates``."""
-    unique = sorted({d for d in (parse_date(x) for x in dates) if d})
+def longest_day_run(dates: Iterable[str], schedule=None, skipped=None,
+                    window: int = 1) -> int:
+    """Longest run of occurrences present in ``dates``."""
+    rest = _skipped_set(skipped)
+    unique = _occurrences(dates, schedule, window)
     if not unique:
         return 0
     best = run = 1
     for prev, cur in zip(unique, unique[1:]):
-        run = run + 1 if (cur - prev).days == 1 else 1
+        run = run + 1 if _window_gap_clear(prev, cur, schedule, window, rest) else 1
         best = max(best, run)
     return best
+
+
+def current_streak(dates: Iterable[str], schedule=None, today: str | None = None,
+                   skipped=None, window: int = 1) -> int:
+    """The run that is still alive: its last completion is today, or the only
+    days since then were rest days."""
+    rest = _skipped_set(skipped)
+    unique = _occurrences(dates, schedule, window)
+    if not unique:
+        return 0
+    now = parse_date(today) if today else date.today()
+    if now is None:
+        now = date.today()
+    if not _window_gap_clear(unique[-1], now, schedule, window, rest):
+        return 0
+    run = 1
+    for prev, cur in zip(reversed(unique), reversed(unique[:-1])):
+        if _window_gap_clear(prev, cur, schedule, window, rest):
+            run += 1
+        else:
+            break
+    return run
 
 
 def now_stamp() -> str:

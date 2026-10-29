@@ -199,48 +199,192 @@ ITEM_BY_ID: dict[str, dict] = {i["id"]: i for i in ITEMS}
 # Achievements
 # --------------------------------------------------------------------------
 
-ACHIEVEMENTS: list[dict] = [
-    {"id": "first_step", "name": "First Step", "icon": "🌱",
-     "desc": "Complete your very first task.", "goal": 1, "track": "total_completions"},
-    {"id": "warming_up", "name": "Warming Up", "icon": "🔥",
-     "desc": "Complete 10 tasks.", "goal": 10, "track": "total_completions"},
-    {"id": "centurion", "name": "Centurion", "icon": "💯",
-     "desc": "Complete 100 tasks.", "goal": 100, "track": "total_completions"},
-    {"id": "streak_3", "name": "Three in a Row", "icon": "3️⃣",
-     "desc": "Hold a 3-day streak on any task.", "goal": 3, "track": "best_task_streak"},
-    {"id": "streak_7", "name": "Unbroken Week", "icon": "📅",
-     "desc": "Hold a 7-day streak on any task.", "goal": 7, "track": "best_task_streak"},
-    {"id": "streak_30", "name": "Thirty Days", "icon": "🗓️",
-     "desc": "Hold a 30-day streak on any task.", "goal": 30, "track": "best_task_streak"},
-    {"id": "level_5", "name": "Seasoned", "icon": "⭐",
-     "desc": "Reach level 5.", "goal": 5, "track": "level"},
-    {"id": "level_10", "name": "Champion", "icon": "🌟",
-     "desc": "Reach level 10.", "goal": 10, "track": "level"},
-    {"id": "level_20", "name": "Mythic", "icon": "💫",
-     "desc": "Reach level 20.", "goal": 20, "track": "level"},
-    {"id": "skill_master", "name": "Specialist", "icon": "📈",
-     "desc": "Raise any single stat to 15.", "goal": 15, "track": "top_stat"},
-    {"id": "collector", "name": "Collector", "icon": "🎒",
-     "desc": "Own 5 pieces of equipment.", "goal": 5, "track": "items_owned"},
-    {"id": "full_loadout", "name": "Fully Decked", "icon": "🏆",
-     "desc": "Equip an item in all five slots.", "goal": 5, "track": "slots_filled"},
-    {"id": "rich", "name": "Deep Pockets", "icon": "💰",
-     "desc": "Hold 1,000 coins at once.", "goal": 1000, "track": "coins"},
-    {"id": "perfect_week", "name": "Perfect Week", "icon": "🎯",
-     "desc": "Finish at least one task every day for 7 days.",
-     "goal": 7, "track": "longest_day_run"},
-    {"id": "first_session", "name": "On the Clock", "icon": "⏱️",
-     "desc": "Complete your first timed session.", "goal": 1, "track": "sessions_won"},
-    {"id": "time_lord", "name": "Time Lord", "icon": "⌛",
-     "desc": "Complete 25 timed sessions.", "goal": 25, "track": "sessions_won"},
-    {"id": "iron_will", "name": "Iron Will", "icon": "🛡️",
-     "desc": "Finish 10 Stay the Course sessions.", "goal": 10, "track": "endure_won"},
-    {"id": "swift", "name": "Swift", "icon": "⚡",
-     "desc": "Beat the clock with half the time to spare, five times.",
-     "goal": 5, "track": "swift_wins"},
-    {"id": "scarred", "name": "Scarred but Standing", "icon": "🩸",
-     "desc": "Win a timed session while wounded.", "goal": 1, "track": "wounded_wins"},
-]
+# Achievements are grouped into *stacks*: tiers on a single track. The Journal
+# shows one card per stack - the next tier still to earn - so a long ladder
+# never floods the page. ``tier`` is the 1-based position inside its family.
+ACHIEVEMENTS: list[dict] = []
+
+
+def _stack(family: str, track: str, tiers: list[tuple]) -> None:
+    """Append one family of achievement tiers, lowest goal first."""
+    for position, tier in enumerate(tiers, start=1):
+        goal, ach_id, name, icon, desc = tier
+        ACHIEVEMENTS.append({
+            "id": ach_id, "name": name, "icon": icon, "desc": desc,
+            "goal": int(goal), "track": track,
+            "family": family, "tier": position,
+        })
+
+
+# Quest completions, lifetime.
+_stack("quests", "total_completions", [
+    (1, "first_step", "First Step", "🌱", "Complete your very first quest."),
+    (10, "warming_up", "Warming Up", "🔥", "Complete 10 quests."),
+    (25, "habit_forming", "Habit Forming", "🔁", "Complete 25 quests."),
+    (50, "steady_hand", "Steady Hand", "✋", "Complete 50 quests."),
+    (100, "centurion", "Centurion", "💯", "Complete 100 quests."),
+    (250, "quest_machine", "Quest Machine", "⚙️", "Complete 250 quests."),
+    (500, "half_a_thousand", "Half a Thousand", "🏅", "Complete 500 quests."),
+    (1_000, "legend_board", "Legend of the Board", "👑", "Complete 1,000 quests."),
+])
+
+# A single quest's streak, which skips the days it is not scheduled for.
+_stack("task_streak", "best_task_streak", [
+    (3, "streak_3", "Three in a Row", "3️⃣", "Hold a 3-day streak on any quest."),
+    (7, "streak_7", "Unbroken Week", "📅", "Hold a 7-day streak on any quest."),
+    (30, "streak_30", "Thirty Days", "🗓️", "Hold a 30-day streak on any quest."),
+    (90, "streak_90", "A Season of Showing Up", "🍂",
+     "Hold a 90-day streak on any quest."),
+    (180, "streak_180", "Half-Year Habit", "🌗", "Hold a 180-day streak on any quest."),
+    (365, "streak_365", "Year of the Hero", "🎉", "Hold a 365-day streak on any quest."),
+])
+
+_stack("level", "level", [
+    (5, "level_5", "Seasoned", "⭐", "Reach level 5."),
+    (10, "level_10", "Champion", "🌟", "Reach level 10."),
+    (20, "level_20", "Mythic", "💫", "Reach level 20."),
+    (50, "level_50", "Legend", "🏆", "Reach level 50."),
+    (100, "level_100", "Ascended", "🌌", "Reach level 100."),
+])
+
+_stack("stat", "top_stat", [
+    (5, "stat_5", "Getting Stronger", "💪", "Raise any single stat to 5."),
+    (10, "stat_10", "Focused", "🧠", "Raise any single stat to 10."),
+    (15, "skill_master", "Specialist", "📈", "Raise any single stat to 15."),
+    (20, "stat_20", "Paragon", "🗿", "Raise any single stat to 20."),
+    (50, "stat_50", "Titan", "🦾", "Raise any single stat to 50."),
+    (100, "stat_100", "Demigod", "🌠", "Raise any single stat to 100."),
+])
+
+# The same quest completed over and over: the best single-quest count.
+_stack("per_quest", "best_task_completions", [
+    (1, "quest_1", "Once More", "✅", "Complete the same quest once."),
+    (5, "quest_5", "Five Times Running", "🖐️", "Complete the same quest 5 times."),
+    (10, "quest_10", "Ten Times", "🔟", "Complete the same quest 10 times."),
+    (25, "quest_25", "Twenty-Five Deep", "🧱", "Complete the same quest 25 times."),
+    (50, "quest_50", "Fifty Strong", "🏗️", "Complete the same quest 50 times."),
+    (100, "quest_100", "The Hundredth Time", "🎯", "Complete the same quest 100 times."),
+])
+
+# First quest of each type - one stack per mode, so none can hide the others.
+_stack("mode_instant", "completions_instant", [
+    (1, "type_instant_1", "Quick Win", "⚡", "Complete your first Instant quest."),
+    (10, "type_instant_10", "Instant Habit", "🎯", "Complete 10 Instant quests."),
+    (25, "type_instant_25", "No Timer Needed", "🏃", "Complete 25 Instant quests."),
+])
+_stack("mode_beat_clock", "completions_beat_clock", [
+    (1, "type_beat_1", "Against the Clock", "⏱️", "Complete your first Beat the Clock quest."),
+    (10, "type_beat_10", "Beat the Bell", "🔔", "Complete 10 Beat the Clock quests."),
+    (25, "type_beat_25", "Time Bender", "⏳", "Complete 25 Beat the Clock quests."),
+])
+_stack("mode_endure", "completions_endure", [
+    (1, "type_endure_1", "Settled In", "🪑", "Complete your first Stay the Course quest."),
+    (10, "type_endure_10", "Iron Discipline", "🧱", "Complete 10 Stay the Course quests."),
+    (25, "type_endure_25", "Unshakeable", "⛰️", "Complete 25 Stay the Course quests."),
+])
+_stack("mode_pomodoro", "completions_pomodoro", [
+    (1, "type_pomodoro_1", "Tomato Seasoned", "🍅", "Complete your first Pomodoro quest."),
+    (10, "type_pomodoro_10", "Round After Round", "🔄", "Complete 10 Pomodoro quests."),
+    (25, "type_pomodoro_25", "Break? What Break?", "🥵", "Complete 25 Pomodoro quests."),
+])
+
+_stack("purchases", "items_owned", [
+    (1, "purchase_1", "Window Shopping", "🛍️", "Own your first piece of equipment."),
+    (5, "collector", "Collector", "🎒", "Own 5 pieces of equipment."),
+    (10, "purchase_10", "Armoury", "🛡️", "Own 10 pieces of equipment."),
+    (25, "purchase_25", "The Whole Emporium", "🏪", "Own all 25 pieces of equipment."),
+])
+
+_stack("loadout", "slots_filled", [
+    (1, "loadout_1", "First Fitting", "🧤", "Equip an item in any slot."),
+    (3, "loadout_3", "Well Dressed", "👕", "Fill three equipment slots."),
+    (5, "full_loadout", "Fully Decked", "🏆", "Equip an item in all five slots."),
+])
+
+_stack("gold", "coins", [
+    (1_000, "rich", "Deep Pockets", "💰", "Hold 1,000 gold at once."),
+    (5_000, "gold_5000", "Vault Builder", "🏦", "Hold 5,000 gold at once."),
+    (10_000, "gold_10000", "Dragon's Hoard", "🐉", "Hold 10,000 gold at once."),
+])
+
+_stack("sessions", "sessions_won", [
+    (1, "first_session", "On the Clock", "⏱️", "Complete your first timed session."),
+    (10, "sessions_10", "Session Regular", "🕰️", "Complete 10 timed sessions."),
+    (25, "time_lord", "Time Lord", "⌛", "Complete 25 timed sessions."),
+    (50, "sessions_50", "Clockwork", "⚙️", "Complete 50 timed sessions."),
+    (100, "sessions_100", "Century of Focus", "🎯", "Complete 100 timed sessions."),
+    (250, "sessions_250", "Timekeeper Supreme", "👑", "Complete 250 timed sessions."),
+])
+
+_stack("endure", "endure_won", [
+    (1, "endure_1", "First Sitting", "🪑", "Finish a Stay the Course session."),
+    (10, "iron_will", "Iron Will", "🛡️", "Finish 10 Stay the Course sessions."),
+    (25, "endure_25", "Endurance Athlete", "🏃", "Finish 25 Stay the Course sessions."),
+    (50, "endure_50", "Made of Stone", "🗿", "Finish 50 Stay the Course sessions."),
+])
+
+_stack("swift", "swift_wins", [
+    (1, "swift_1", "Quick Draw", "🎯", "Beat the clock with half the time to spare."),
+    (5, "swift", "Swift", "⚡", "Beat the clock with half the time to spare, five times."),
+    (25, "swift_25", "Speed Demon", "💨",
+     "Beat the clock with half the time to spare, 25 times."),
+    (100, "swift_100", "Blink and Miss It", "🌀",
+     "Beat the clock with half the time to spare, 100 times."),
+])
+
+_stack("wounded", "wounded_wins", [
+    (1, "scarred", "Scarred but Standing", "🩸", "Win a timed session while wounded."),
+    (5, "wounded_5", "Still Standing", "🧹", "Win 5 timed sessions while wounded."),
+    (25, "wounded_25", "Unkillable", "🔥", "Win 25 timed sessions while wounded."),
+])
+
+_stack("perfect_week", "longest_day_run", [
+    (7, "perfect_week", "Perfect Week", "🎯",
+     "Finish at least one quest every day for 7 days."),
+    (30, "perfect_month", "Perfect Month", "🌙",
+     "Finish at least one quest every day for 30 days."),
+    (100, "perfect_100", "Hundred-Day Run", "📆",
+     "Finish at least one quest every day for 100 days."),
+    (365, "perfect_year", "Perfect Year", "🎆",
+     "Finish at least one quest every day for a year."),
+])
+
+_stack("day_streak", "best_day_streak", [
+    (3, "day_streak_3", "Three Days Active", "🌱", "Keep a 3-day hero streak."),
+    (7, "day_streak_7", "Week Warrior", "🔥", "Keep a 7-day hero streak."),
+    (30, "day_streak_30", "Monthly Momentum", "📅", "Keep a 30-day hero streak."),
+    (90, "day_streak_90", "Quarter of a Year", "🍂", "Keep a 90-day hero streak."),
+    (180, "day_streak_180", "Half-Year Hero", "🌗", "Keep a 180-day hero streak."),
+    (365, "day_streak_365", "Full Circle", "🎉", "Keep a 365-day hero streak."),
+])
+
+_stack("coins_earned", "coins_earned", [
+    (100, "purse_100", "First Purse", "👛", "Earn 100 gold in total."),
+    (1_000, "purse_1000", "Paying Your Way", "💵", "Earn 1,000 gold in total."),
+    (10_000, "purse_10000", "Gold Rush", "⛏️", "Earn 10,000 gold in total."),
+    (100_000, "purse_100000", "Fortune", "💎", "Earn 100,000 gold in total."),
+])
+
+_stack("xp", "total_xp", [
+    (100, "xp_100", "Apprentice", "📘", "Earn 100 XP in total."),
+    (1_000, "xp_1000", "Journeyman", "📗", "Earn 1,000 XP in total."),
+    (10_000, "xp_10000", "Veteran", "📕", "Earn 10,000 XP in total."),
+    (100_000, "xp_100000", "Grandmaster", "🎓", "Earn 100,000 XP in total."),
+    (1_000_000, "xp_1000000", "XP Immortal", "🌌", "Earn 1,000,000 XP in total."),
+])
+
+_stack("busy_day", "best_day_completions", [
+    (5, "busy_5", "Busy Day", "🐝", "Complete 5 quests in one day."),
+    (10, "busy_10", "Productive Day", "🏗️", "Complete 10 quests in one day."),
+    (20, "busy_20", "Overachiever", "🚀", "Complete 20 quests in one day."),
+    (50, "busy_50", "Unstoppable Day", "🌋", "Complete 50 quests in one day."),
+])
+
+_stack("all_stats", "min_stat", [
+    (5, "rounded_5", "Well Rounded", "🧭", "Get every stat to at least 5."),
+    (10, "rounded_10", "Balanced Hero", "⚖️", "Get every stat to at least 10."),
+    (20, "rounded_20", "Complete Hero", "🧩", "Get every stat to at least 20."),
+])
 
 ACHIEVEMENT_BY_ID: dict[str, dict] = {a["id"]: a for a in ACHIEVEMENTS}
 
@@ -267,6 +411,21 @@ DIFFICULTIES: list[dict] = [
 ]
 
 DIFFICULTY_BY_ID: dict[str, dict] = {d["id"]: d for d in DIFFICULTIES}
+
+# Quests are available on the weekdays the hero picks. Numbers follow ISO order
+# (Monday = 1 ... Sunday = 7) so ``date.isoweekday()`` can be used directly.
+WEEKDAYS: list[dict] = [
+    {"id": 1, "label": "Mon", "name": "Monday"},
+    {"id": 2, "label": "Tue", "name": "Tuesday"},
+    {"id": 3, "label": "Wed", "name": "Wednesday"},
+    {"id": 4, "label": "Thu", "name": "Thursday"},
+    {"id": 5, "label": "Fri", "name": "Friday"},
+    {"id": 6, "label": "Sat", "name": "Saturday"},
+    {"id": 7, "label": "Sun", "name": "Sunday"},
+]
+
+WEEKDAY_BY_ID: dict[int, dict] = {d["id"]: d for d in WEEKDAYS}
+WEEKDAY_IDS: list[int] = [d["id"] for d in WEEKDAYS]
 
 # --------------------------------------------------------------------------
 # Timed sessions
@@ -298,6 +457,14 @@ SESSION_MODES: list[dict] = [
         "blurb": "Keep at it for the whole time. Finish early and it doesn't count.",
         "example": "Read for 30 minutes.",
     },
+    {
+        "id": "pomodoro",
+        "label": "Pomodoro",
+        "icon": "🍅",
+        "timed": True,
+        "blurb": "Focus rounds with breaks, for as long as you like.",
+        "example": "25 min focus, 5 min break, repeat.",
+    },
 ]
 
 SESSION_MODE_BY_ID: dict[str, dict] = {m["id"]: m for m in SESSION_MODES}
@@ -312,12 +479,55 @@ SESSION_MAX_MINUTES = 240
 # UI shows is driven by the server's own clock.
 SESSION_GRACE_SECONDS = 1.0
 
+# Pomodoro rounds run until the hero says they are done, so the payout is driven
+# by the number of focus rounds actually finished rather than a fixed target.
+POMODORO_DEFAULT_BREAK_MINUTES = 5
+POMODORO_ROUND_BONUS = 0.5        # every finished round after the first adds this
+POMODORO_MAX_FACTOR = 3.0         # ... up to this multiple of the quest's payout
+
+# Finishing close to the round estimate the quest was created with pays extra:
+# exactly as planned is worth +50%, and every round of difference costs 15% of
+# that bonus until it runs out (being far off is never punished below par).
+POMODORO_ESTIMATE_BONUS = 0.5
+POMODORO_ESTIMATE_STEP = 0.15
+
+# --------------------------------------------------------------------------
+# Alarms (global settings, not per quest)
+# --------------------------------------------------------------------------
+
+# Built-in alarms are synthesised in the browser with the Web Audio API, so the
+# app needs no audio assets and works offline. A custom file is copied into the
+# save folder next to the database - the user never has to place it themselves.
+ALARM_SOUNDS: list[dict] = [
+    {"id": "bell", "label": "Bell", "blurb": "Three ringing strikes."},
+    {"id": "chime", "label": "Chime", "blurb": "A gentle rising three-note chime."},
+    {"id": "woodblock", "label": "Woodblock", "blurb": "Two short, dry knocks."},
+    {"id": "ping", "label": "Ping", "blurb": "One bright, fading ping."},
+]
+ALARM_SOUND_BY_ID: dict[str, dict] = {s["id"]: s for s in ALARM_SOUNDS}
+DEFAULT_ALARM_SOUND = "bell"
+CUSTOM_ALARM_ID = "custom"
+DEFAULT_ALARM_VOLUME = 0.7
+
+ALARM_MAX_BYTES = 2 * 1024 * 1024
+ALARM_TYPES: dict[str, str] = {
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "audio/wave": "wav",
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/ogg": "ogg",
+    "audio/vorbis": "ogg",
+}
+ALARM_FILE_LABEL = "WAV, MP3 or OGG"
+
 # --------------------------------------------------------------------------
 # Health, hits and healing
 # --------------------------------------------------------------------------
 
 MAX_HP_BASE = 40
 MAX_HP_PER_VIT = 10
+MAX_HP_PER_LEVEL = 10             # every level-up raises the health bar
 
 # Fraction of maximum health lost when the bell catches you out.
 HIT_DAMAGE_PCT: dict[str, float] = {
@@ -333,6 +543,20 @@ HEAL_MIN_PER_COMPLETION = 2
 REST_HEAL_PCT_PER_DAY = 0.10      # a new active day lets the hero recover
 WOUNDED_COIN_MULTIPLIER = 0.5     # at 0 HP, "Wounded": half gold until healed
 
+# A daily habit that never happened costs the same curve as a missed window.
+# Scored once, lazily, when a new day is first opened.
+MISSED_DAMAGE_PCT: dict[str, float] = HIT_DAMAGE_PCT
+
+# When one day's misses hurt this badly and cut this deep, the quest log itself
+# is probably too heavy: the UI suggests trimming it.
+OVERLOAD_MISSED_MIN = 2
+OVERLOAD_DAMAGE_FRACTION = 0.20   # of max HP, at risk in a single day
+OVERLOAD_HP_FRACTION = 0.75       # and the hero is already at or below this
+
+# How many past days the nightly reckoning will score when a hero returns
+# after an absence. Coming back from a sabbatical should sting, not kill.
+RECKONING_LOOKBACK_DAYS = 14
+
 # --------------------------------------------------------------------------
 # Session reward bonuses
 # --------------------------------------------------------------------------
@@ -340,6 +564,16 @@ WOUNDED_COIN_MULTIPLIER = 0.5     # at 0 HP, "Wounded": half gold until healed
 SPEED_BONUS_PER_10_PCT_LEFT = 0.05   # Beat the Clock: reward for spare time
 SPEED_BONUS_CAP = 0.60
 ENDURE_BONUS = 0.15                  # Stay the Course: reward for the commitment
+
+# --------------------------------------------------------------------------
+# Character export
+# --------------------------------------------------------------------------
+
+# A hero sheet other apps (a story or battle site) can consume. The format
+# name and version are the contract: bump the version only when a consumer
+# would have to change how it reads the document.
+EXPORT_FORMAT = "habitquest.character"
+EXPORT_FORMAT_VERSION = 1
 
 # --------------------------------------------------------------------------
 # Tunables
@@ -351,4 +585,4 @@ XP_EXPONENT = 1.3
 STREAK_BONUS_PER_DAY = 0.05
 STREAK_BONUS_CAP = 0.75
 DAILY_FIRST_BONUS = 0.20       # first completion of the day
-MAX_LEVEL = 60
+MAX_LEVEL = 100

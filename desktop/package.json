@@ -1,0 +1,89 @@
+{
+  "name": "habit-quest-desktop",
+  "productName": "Habit Quest",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Habit Quest as a standalone desktop window, running the same local server",
+  "author": "Habit Quest",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "verify": "electron verify.js",
+    "smoke": "node smoke-backend.js",
+    "pack": "electron-builder --dir --publish never",
+    "dist": "electron-builder --win --x64 --publish never"
+  },
+  "devDependencies": {
+    "electron": "^45.0.0",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "com.habitquest.desktop",
+    "productName": "Habit Quest",
+    "copyright": "Habit Quest",
+    "asar": false,
+    "npmRebuild": false,
+    "compression": "normal",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "backend.js",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../static",
+        "to": "static",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../habitquest",
+        "to": "habitquest",
+        "filter": [
+          "**/*.py",
+          "!**/_*.py"
+        ]
+      },
+      {
+        "from": "backend-dist",
+        "to": "backend",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "Habit Quest",
+      "artifactName": "Habit-Quest-Setup-${version}.exe",
+      "deleteAppDataOnUninstall": false
+    },
+    "artifactName": "Habit-Quest-${version}-win-${arch}.${ext}"
+  }
+}

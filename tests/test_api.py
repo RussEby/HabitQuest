@@ -11,6 +11,7 @@ import shutil
 import tempfile
 import threading
 import unittest
+from datetime import date, timedelta
 import urllib.error
 import urllib.request
 
@@ -207,6 +208,75 @@ class TestCharacterFlow(ApiTestBase):
         self.assertEqual(status, 400)
         # and the server is still healthy afterwards
         self.assertEqual(self.get("/api/health")[0], 200)
+
+
+class TestDayProbe(ApiTestBase):
+    """The cheap date check the window polls instead of rebuilding all state."""
+
+    def test_probe_answers_before_a_character_exists(self):
+        status, payload = self.get("/api/day")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["today"], date.today().isoformat())
+        self.assertIn("server_now", payload)
+        self.assertIsNone(payload["armed_day"])
+
+    def test_probe_agrees_with_the_full_state(self):
+        self.post("/api/character", {"name": "Ada", "archetype": "warrior"})
+        _, probe = self.get("/api/day")
+        _, state = self.get("/api/state")
+        self.assertEqual(probe["today"], state["today"])
+        self.assertEqual(probe["armed_day"], date.today().isoformat())
+
+    def test_probe_does_not_advance_the_ledger(self):
+        self.post("/api/character", {"name": "Ada", "archetype": "warrior"})
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        self.game._conn.execute(
+            "UPDATE meta SET value = ? WHERE key = 'reckoned_day'", (yesterday,))
+        self.game._conn.commit()
+        for _ in range(3):
+            status, probe = self.get("/api/day")
+            self.assertEqual(status, 200)
+            self.assertEqual(probe["armed_day"], yesterday)
+
+
+class TestPomodoroPauseRoutes(ApiTestBase):
+    """Pausing the timer and banking a quest, over the real HTTP interface."""
+
+    def setUp(self):
+        super().setUp()
+        self.post("/api/character", {"name": "Ada", "archetype": "mage"})
+        _, created = self.post("/api/tasks", {
+            "name": "Deep work", "xp": 20, "coins": 10, "mode": "pomodoro",
+            "duration_minutes": 25, "break_minutes": 5, "pomodoro_sessions": 3,
+        })
+        self.task_id = created["task"]["id"]
+
+    def test_pause_and_resume_the_timer(self):
+        status, _ = self.post(f"/api/tasks/{self.task_id}/session/start")
+        self.assertEqual(status, 200)
+
+        status, paused = self.post(f"/api/tasks/{self.task_id}/session/pause")
+        self.assertEqual(status, 200)
+        self.assertTrue(paused["session"]["paused"])
+
+        status, resumed = self.post(f"/api/tasks/{self.task_id}/session/resume")
+        self.assertEqual(status, 200)
+        self.assertFalse(resumed["session"]["paused"])
+
+    def test_pausing_the_quest_keeps_its_rounds_for_later(self):
+        self.post(f"/api/tasks/{self.task_id}/session/start")
+        self.post(f"/api/tasks/{self.task_id}/session/cycle")
+
+        status, quest = self.post(f"/api/tasks/{self.task_id}/session/pause-quest")
+        self.assertEqual(status, 200)
+        self.assertEqual(quest["outcome"], "quest_paused")
+        self.assertEqual(quest["rounds"], 1)
+        self.assertIsNone(quest["state"]["session"])
+
+        status, again = self.post(f"/api/tasks/{self.task_id}/session/start")
+        self.assertEqual(status, 200)
+        self.assertEqual(again["outcome"], "resumed")
+        self.assertEqual(again["session"]["pomodoro"]["completed"], 1)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://habitquest.local/schemas/character-export-v1.json",
+  "title": "Habit Quest character export",
+  "description": "A portable hero sheet exported by Habit Quest. Quests, the journal, sessions and achievements are intentionally absent. Consumers should check format and format_version, ignore unknown fields, and treat the file as user-supplied data.",
+  "type": "object",
+  "required": ["format", "format_version", "exported_at", "source", "stats_meta", "character"],
+  "properties": {
+    "format": { "const": "habitquest.character" },
+    "format_version": { "const": 1 },
+    "exported_at": {
+      "type": "string",
+      "description": "When the snapshot was taken, ISO 8601 local time with milliseconds and no timezone offset."
+    },
+    "source": {
+      "type": "object",
+      "required": ["app", "app_version"],
+      "properties": {
+        "app": { "const": "Habit Quest" },
+        "app_version": { "type": "string" }
+      }
+    },
+    "stats_meta": {
+      "type": "array",
+      "description": "Reference data for the five stat keys, so the document explains its own keys.",
+      "items": {
+        "type": "object",
+        "required": ["key", "label", "abbr", "blurb"],
+        "properties": {
+          "key": { "enum": ["str", "int", "vit", "agi", "cha"] },
+          "label": { "type": "string" },
+          "abbr": { "type": "string" },
+          "blurb": { "type": "string" }
+        }
+      }
+    },
+    "character": {
+      "type": "object",
+      "required": [
+        "uid", "name", "created_at", "archetype", "level", "xp",
+        "level_floor_xp", "level_xp", "level_xp_needed", "level_progress",
+        "next_level_xp", "max_level", "power", "skill_points", "stats",
+        "health", "gold", "equipment", "record"
+      ],
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Stable identity for this hero across exports. Use it as the primary key when saving an uploaded hero."
+        },
+        "name": { "type": "string", "maxLength": 32 },
+        "created_at": {
+          "type": "string",
+          "description": "When the hero was created in Habit Quest, ISO 8601 local time."
+        },
+        "archetype": {
+          "type": "object",
+          "required": ["id", "name", "icon", "color", "blurb", "base_stats"],
+          "properties": {
+            "id": { "type": "string", "description": "warrior, mage, rogue or ranger today; do not hard-code the list." },
+            "name": { "type": "string" },
+            "icon": { "type": "string" },
+            "color": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
+            "blurb": { "type": "string" },
+            "base_stats": { "$ref": "#/$defs/statBlock" }
+          }
+        },
+        "level": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "xp": { "type": "integer", "minimum": 0 },
+        "level_floor_xp": { "type": "integer", "minimum": 0 },
+        "level_xp": { "type": "integer", "minimum": 0 },
+        "level_xp_needed": { "type": "integer", "minimum": 1 },
+        "level_progress": { "type": "number", "minimum": 0, "maximum": 1 },
+        "next_level_xp": { "type": "integer", "minimum": 0 },
+        "max_level": { "type": "boolean" },
+        "power": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Habit Quest's own balance number: sum(total stats) * 3 + sum(gear bonuses) * 5 + level * 10."
+        },
+        "skill_points": {
+          "type": "object",
+          "required": ["available", "spent"],
+          "properties": {
+            "available": { "type": "integer", "minimum": 0 },
+            "spent": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "stats": {
+          "type": "object",
+          "required": ["base", "gear", "total"],
+          "properties": {
+            "base": { "$ref": "#/$defs/statBlock" },
+            "gear": { "$ref": "#/$defs/statBlock" },
+            "total": { "$ref": "#/$defs/statBlock" }
+          }
+        },
+        "health": {
+          "type": "object",
+          "required": ["hp", "max_hp", "pct", "wounded"],
+          "properties": {
+            "hp": { "type": "integer", "minimum": 0 },
+            "max_hp": { "type": "integer", "minimum": 1 },
+            "pct": { "type": "number", "minimum": 0, "maximum": 1 },
+            "wounded": { "type": "boolean", "description": "True when Habit Quest currently has the hero at 0 HP." }
+          }
+        },
+        "gold": {
+          "type": "object",
+          "required": ["current", "earned"],
+          "properties": {
+            "current": { "type": "integer", "minimum": 0 },
+            "earned": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "equipment": {
+          "type": "object",
+          "description": "Exactly the five equipment slots. Empty slots are null.",
+          "required": ["weapon", "head", "body", "boots", "accessory"],
+          "properties": {
+            "weapon": { "$ref": "#/$defs/equippedItem" },
+            "head": { "$ref": "#/$defs/equippedItem" },
+            "body": { "$ref": "#/$defs/equippedItem" },
+            "boots": { "$ref": "#/$defs/equippedItem" },
+            "accessory": { "$ref": "#/$defs/equippedItem" }
+          }
+        },
+        "record": {
+          "type": "object",
+          "required": ["quests_completed", "day_streak", "best_day_streak", "last_active_day"],
+          "properties": {
+            "quests_completed": { "type": "integer", "minimum": 0 },
+            "day_streak": { "type": "integer", "minimum": 0 },
+            "best_day_streak": { "type": "integer", "minimum": 0 },
+            "last_active_day": {
+              "type": ["string", "null"],
+              "description": "YYYY-MM-DD, or null for a hero that has never completed a quest."
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "statBlock": {
+      "type": "object",
+      "required": ["str", "int", "vit", "agi", "cha"],
+      "properties": {
+        "str": { "type": "integer", "minimum": 0 },
+        "int": { "type": "integer", "minimum": 0 },
+        "vit": { "type": "integer", "minimum": 0 },
+        "agi": { "type": "integer", "minimum": 0 },
+        "cha": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "equippedItem": {
+      "type": ["object", "null"],
+      "required": ["id", "name", "slot", "icon", "rarity", "rarity_label",
+                   "level_req", "price", "bonus", "bonus_text", "description"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "slot": { "enum": ["weapon", "head", "body", "boots", "accessory"] },
+        "icon": { "type": "string" },
+        "rarity": { "enum": ["common", "uncommon", "rare", "epic", "legendary"] },
+        "rarity_label": { "type": "string" },
+        "level_req": { "type": "integer", "minimum": 1 },
+        "price": { "type": "integer", "minimum": 0 },
+        "bonus": {
+          "type": "object",
+          "description": "Only the stats this item raises; absent keys mean zero.",
+          "additionalProperties": { "type": "integer", "minimum": 0 },
+          "propertyNames": { "enum": ["str", "int", "vit", "agi", "cha"] }
+        },
+        "bonus_text": { "type": "string" },
+        "description": { "type": "string" }
+      }
+    }
+  }
+}
